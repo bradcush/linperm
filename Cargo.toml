@@ -1,0 +1,3 @@
+[workspace]
+members = ["biperm", "app"]
+resolver = "2"
