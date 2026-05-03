@@ -70,7 +70,9 @@ cargo bench
 
 ## Documentation
 
-From `///` doc comments:
+From `///` doc comments. LaTeX in doc comments is rendered by KaTeX, wired in
+via `katex-header.html` and `.cargo/config.toml`. Use `$…$` for inline math and
+`$$…$$` for display math.
 
 ``` sh
 # Build and open the API docs
@@ -168,3 +170,7 @@ linperm/
 - Benchmarks
 - Paralellism
 - FFT-based speedups
+
+## Skills
+
+- `/initialize-linperm`: Bootstrap project

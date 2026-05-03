@@ -1,5 +1,5 @@
 ---
-name: initialize-perms
+name: initialize-linperm
 description: Initializes a starting point for developing BiPerm and MulPerm
 permutation arguments in Rust. Use when the user asks to "initialize a
 linear-time permutations project", "create an initial codebase to develop

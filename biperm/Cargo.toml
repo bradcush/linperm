@@ -1,4 +1,19 @@
 [package]
 name = "biperm"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "BiPerm"
+
+[dependencies]
+permcore.workspace = true
+ark-ff.workspace = true
+ark-poly.workspace = true
+ark-std.workspace = true
+
+[features]
+default = ["std"]
+std = ["permcore/std"]
+parallel = ["permcore/parallel"]
