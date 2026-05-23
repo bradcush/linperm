@@ -53,10 +53,9 @@ viewed online via `https://eprint.iacr.org/2025/1850`.
 
 #### Crates
 
-- `core`: Local permutation library
+- `permcore`: Local permutation library
 - `biperm`: BiPerm specific implemtation
 - `mulperm`: MulPerm specific implementation
-- `app`: Intergration, puts everything together
 
 TBD
 

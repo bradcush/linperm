@@ -105,4 +105,19 @@ mod tests {
         let table = eq_eval_table::<Fr>(&[]);
         assert_eq!(table, vec![Fr::one()]);
     }
+
+    #[test]
+    // There's a single value that matches so any number of zeros + 1 = 1
+    // on $B_\mu$. This extends to $F_\mu$ for the multilinear extension,
+    // since it's uniquely determined by it's values on $B_\mu$.
+    fn eq_eval_table_sums_to_one() {
+        let mut rng = test_rng();
+        for mu in [1, 4, 7] {
+            // Random field elements, $\mu$ variables
+            let alpha: Vec<Fr> = (0..mu).map(|_| Fr::rand(&mut rng)).collect();
+            let table = eq_eval_table(&alpha);
+            let sum: Fr = table.iter().copied().sum();
+            assert_eq!(sum, Fr::one(), "mismatch at mu = {mu}");
+        }
+    }
 }

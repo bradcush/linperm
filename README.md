@@ -94,7 +94,6 @@ cargo fmt --check
   - permutation type, equality polynomial, Fiat-Shamir transcript, PCS trait
 - `biperm`: BiPerm implementation, library crate
 - `mulperm`: MulPerm implementation, library crate
-- `app`: Usage and integration over BN254, binary crate
 
 ## Plan
 
@@ -141,8 +140,7 @@ cargo fmt --check
 linperm/
 ├── permcore/       # Shared building blocks
 ├── biperm/         # Currently re-exports permcore
-├── mulperm/        # Currently re-exports permcore
-└── app/            # BN254 smoke check + integration tests
+└── mulperm/        # Currently re-exports permcore
 ```
 
 ### Rust specifics
@@ -152,7 +150,6 @@ linperm/
   - [ ] Layout matches `ark-poly`s little-endian, why LE?
 - [ ] A lot of helpers already doing some heavy lifting
 - PCS (Setup / Commit / Open / Verify, transcript-aware)
-- `app` has a smoke check, not sure what it is
 
 ## Deferred work
 
