@@ -13,6 +13,9 @@ ark-ff.workspace = true
 ark-poly.workspace = true
 ark-std.workspace = true
 
+[dev-dependencies]
+ark-std = { workspace = true, features = ["std"] }
+
 [features]
 default = ["std"]
 std = ["permcore/std"]

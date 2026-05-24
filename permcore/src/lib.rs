@@ -14,6 +14,7 @@ pub mod eq;
 pub mod error;
 pub mod pcs;
 pub mod permutation;
+pub mod sumcheck;
 pub mod transcript;
 
 pub use error::CoreError;

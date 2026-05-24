@@ -1,6 +1,6 @@
 use core::fmt;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum CoreError {
     NotAPermutation { len: usize, index: usize },
     NotPowerOfTwo { len: usize },
