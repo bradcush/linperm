@@ -3,8 +3,10 @@ use ark_ff::UniformRand;
 use ark_poly::DenseMultilinearExtension;
 use ark_std::test_rng;
 
-use biperm::permcore::{Permutation, Transcript};
-use biperm::{prove, verify};
+use biperm::permcore::{
+    MockPcs, Permutation, PolynomialCommitment, Transcript,
+};
+use biperm::{prove, verify, BiPermProof};
 
 #[test]
 // BiPerm prove and verify public API. Checks the
@@ -31,8 +33,10 @@ fn biperm_round_trip() {
     // Create the multilinear extensions of $f$ and $g$
     let f = DenseMultilinearExtension::from_evaluations_vec(num_vars, f_evals);
     let g = DenseMultilinearExtension::from_evaluations_vec(num_vars, g_evals);
+    let (pk, vk) = MockPcs::<Fr>::setup(num_vars, &mut rng).unwrap();
     let mut prover_t = Transcript::new(b"integration");
-    let proof = prove(&perm, &f, &g, &mut prover_t).unwrap();
+    let proof: BiPermProof<Fr, MockPcs<Fr>> =
+        prove(&pk, &perm, &f, &g, &mut prover_t).unwrap();
     let mut verifier_t = Transcript::new(b"integration");
-    verify(&perm, &f, &g, &proof, &mut verifier_t).unwrap();
+    verify(&vk, &perm, &proof, &mut verifier_t).unwrap();
 }
