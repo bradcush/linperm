@@ -22,6 +22,45 @@ recommended for use in production systems. Use at your own risk.
 - §7 MulPerm + Algorithms 3-7: second PIOP to implement.
 - §7.3 Bucketing: the trick that gets MulPerm to $n \cdot O(\sqrt(log n))$.
 
+## Example
+
+``` rs
+// biperm/tests/integration.ts
+use ark_bn254::Fr;
+use ark_ff::UniformRand;
+use ark_poly::DenseMultilinearExtension;
+use ark_std::test_rng;
+
+use biperm::permcore::{
+    MockPcs, Permutation, PolynomialCommitment, Transcript,
+};
+use biperm::{prove, verify, BiPermProof};
+
+#[test]
+fn biperm_round_trip() {
+    let mut rng = test_rng();
+    let perm = Permutation::new(vec![
+        5, 3, 7, 1, 0, 6, 2, 4, 9, 11, 8, 10, 13, 15, 12, 14,
+    ])
+    .unwrap();
+    let num_vars = perm.num_vars();
+    let f_evals: Vec<Fr> =
+        (0..(1 << num_vars)).map(|_| Fr::rand(&mut rng)).collect();
+    let mut g_evals = vec![Fr::from(0u64); perm.size()];
+    for x in 0..perm.size() {
+        g_evals[perm.apply(x)] = f_evals[x];
+    }
+    let f = DenseMultilinearExtension::from_evaluations_vec(num_vars, f_evals);
+    let g = DenseMultilinearExtension::from_evaluations_vec(num_vars, g_evals);
+    let (pk, vk) = MockPcs::<Fr>::setup(num_vars, &mut rng).unwrap();
+    let mut prover_t = Transcript::new(b"integration");
+    let proof: BiPermProof<Fr, MockPcs<Fr>> =
+        prove(&pk, &perm, &f, &g, &mut prover_t).unwrap();
+    let mut verifier_t = Transcript::new(b"integration");
+    verify(&vk, &perm, &proof, &mut verifier_t).unwrap();
+}
+```
+
 ## Workspace
 
 - Commands should be run at the workspace level
@@ -153,12 +192,10 @@ linperm/
 
 ## Deferred work
 
-- Sumcheck per BiPerm/MulPerm
-- Prover/verifier for both
-  - [ ] Talks NARK, why not SNARK? Intentional?
-- PCS backends (eg. Hyrax, Multi-linear KZG)
-  - [ ] Is there actually anything we need to do here?
-- Benchmarks
+- Sumcheck per MulPerm
+- Prover/verifier for MulPerm
+- PCS backend support (eg. Hyrax, Multi-linear KZG)
+- Benchmarks by itself, w/ HyperPlonk
 
 ### Optional
 
