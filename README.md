@@ -25,7 +25,7 @@ recommended for use in production systems. Use at your own risk.
 ## Example
 
 ``` rs
-// biperm/tests/integration.ts
+// biperm/tests/integration.rs
 use ark_bn254::Fr;
 use ark_ff::UniformRand;
 use ark_poly::DenseMultilinearExtension;
@@ -34,7 +34,7 @@ use ark_std::test_rng;
 use biperm::permcore::{
     MockPcs, Permutation, PolynomialCommitment, Transcript,
 };
-use biperm::{prove, verify, BiPermProof};
+use biperm::{index, prove, verify};
 
 #[test]
 fn biperm_round_trip() {
@@ -52,12 +52,12 @@ fn biperm_round_trip() {
     }
     let f = DenseMultilinearExtension::from_evaluations_vec(num_vars, f_evals);
     let g = DenseMultilinearExtension::from_evaluations_vec(num_vars, g_evals);
-    let (pk, vk) = MockPcs::<Fr>::setup(num_vars, &mut rng).unwrap();
+    let (pk, vk) = MockPcs::<Fr>::setup(num_vars * 3 / 2, &mut rng).unwrap();
+    let (p_idx, v_idx) = index::<Fr, MockPcs<Fr>>(&pk, &perm).unwrap();
     let mut prover_t = Transcript::new(b"integration");
-    let proof: BiPermProof<Fr, MockPcs<Fr>> =
-        prove(&pk, &perm, &f, &g, &mut prover_t).unwrap();
+    let proof = prove(&pk, &p_idx, &f, &g, &mut prover_t).unwrap();
     let mut verifier_t = Transcript::new(b"integration");
-    verify(&vk, &perm, &proof, &mut verifier_t).unwrap();
+    verify(&vk, &v_idx, &proof, &mut verifier_t).unwrap();
 }
 ```
 
@@ -116,6 +116,12 @@ via `katex-header.html` and `.cargo/config.toml`. Use `$…$` for inline math an
 ``` sh
 # Build and open the API docs
 cargo doc --no-deps --open
+```
+
+Clean what's generated:
+
+``` sh
+cargo clean --doc
 ```
 
 ## Formatting

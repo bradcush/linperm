@@ -18,7 +18,7 @@ pub mod sumcheck;
 pub mod transcript;
 
 pub use error::CoreError;
-pub use pcs::{MockPcs, PolynomialCommitment};
+pub use pcs::{MleRef, MockPcs, PolynomialCommitment};
 pub use permutation::Permutation;
 pub use transcript::Transcript;
 

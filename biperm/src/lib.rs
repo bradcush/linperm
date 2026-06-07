@@ -9,8 +9,13 @@
 //! BiPerm factorizes the indicator as $\tilde{\mathbb{1}}\_\sigma(X, Y) = \tilde{\mathbb{1}}\_{\sigma_L}(X, Y_L) \cdot \tilde{\mathbb{1}}\_{\sigma_R}(X, Y_R)$
 //! on the boolean cube, giving a degree-3 sumcheck on the product $f \cdot \tilde{\mathbb{1}}\_{\sigma_L} \cdot \tilde{\mathbb{1}}\_{\sigma_R}$.
 //!
-//! The verifier never holds $f$ or $g$ directly. They hold a PCS verifier key
-//! and the commitments in the proof, plus the public permutation $\sigma$.
+//! The protocol is *indexed* meaning [`index`] preprocesses a fixed $\sigma$
+//! once, committing to the two sparse $3\mu/2$-variate indicator polynomials
+//! ($n$ nonzero entries out of $n^{1.5}$, hence a friendly PCS requirement).
+//!
+//! The verifier never holds $f$, $g$, or $\sigma$ directly. They hold a PCS
+//! verifier key, the [`BiPermVerifierIndex`] with the indicator commitments,
+//! and the commitments and openings carried in the rest of the proof.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -21,13 +26,14 @@ pub use permcore;
 use alloc::vec::Vec;
 
 use ark_ff::PrimeField;
-use ark_poly::DenseMultilinearExtension;
+use ark_poly::{DenseMultilinearExtension, SparseMultilinearExtension};
 use permcore::eq::eq_eval_table;
 use permcore::sumcheck::{self, SumcheckError, SumcheckProof};
 use permcore::{CoreError, Permutation, PolynomialCommitment, Transcript};
 
-/// Perm proof: PCS commitments to $f, g$, the sumcheck transcript, PCS
-/// openings of $g$ at $\alpha$, and $f$ at the sumcheck challenge $r$.
+/// Perm proof: PCS commitments to $f, g$, the sumcheck transcript, and PCS
+/// openings of $g$ at $\alpha$, $f$ at the sumcheck challenge $r$, and the
+/// two indicator polynomials at $(r \Vert \alpha_L)$ / $(r \Vert \alpha_R)$.
 pub struct BiPermProof<F: PrimeField, P: PolynomialCommitment<F>> {
     pub f_commit: P::Commitment,
     pub g_commit: P::Commitment,
@@ -36,6 +42,30 @@ pub struct BiPermProof<F: PrimeField, P: PolynomialCommitment<F>> {
     pub g_opening: P::Proof,
     pub f_at_r: F,
     pub f_opening: P::Proof,
+    pub ind_l_at_r: F,
+    pub ind_l_opening: P::Proof,
+    pub ind_r_at_r: F,
+    pub ind_r_opening: P::Proof,
+}
+
+/// Prover half of the index for a fixed $\sigma$: the
+/// sparse indicator polynomials plus their commitments.
+/// Built once by [`index`] and reused across proofs.
+pub struct BiPermProverIndex<F: PrimeField, P: PolynomialCommitment<F>> {
+    pub perm: Permutation,
+    pub ind_l: SparseMultilinearExtension<F>,
+    pub ind_r: SparseMultilinearExtension<F>,
+    pub ind_l_commit: P::Commitment,
+    pub ind_r_commit: P::Commitment,
+}
+
+/// Verifier half of the index: just $\mu$ and the indicator commitments.
+/// Indexing is deterministic and public, so anyone can recompute this
+/// from $\sigma$, the prover never gets to choose it arbitrarily.
+pub struct BiPermVerifierIndex<F: PrimeField, P: PolynomialCommitment<F>> {
+    pub num_vars: usize,
+    pub ind_l_commit: P::Commitment,
+    pub ind_r_commit: P::Commitment,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -80,39 +110,87 @@ fn indicator_table<F: PrimeField>(
         .collect()
 }
 
-/// Prove $f(\sigma(x)) = g(x)$ for all $x \in B_\mu$.
-///
-/// Commits to $f, g$ via the PCS, absorbs the commitments into the
-/// transcript, then squeezes $\alpha$ so $\alpha$ depends on the
-/// specific instance. After sumcheck rounds, opens $g$ at
-/// $\alpha$ and $f$ at the sumcheck challenge $r$.
-pub fn prove<F: PrimeField, P: PolynomialCommitment<F>>(
+/// Output of [`index`], computing
+/// the prover and verifier halves.
+pub type BiPermIndex<F, P> =
+    (BiPermProverIndex<F, P>, BiPermVerifierIndex<F, P>);
+
+/// Preprocess a fixed $\sigma$: build and commit the two sparse indicator
+/// polynomials $\tilde{\mathbb{1}}\_{\sigma_L}, \tilde{\mathbb{1}}\_{\sigma_R}$.
+/// Runs once per permutation, independent of any $f, g$ instance.
+pub fn index<F: PrimeField, P: PolynomialCommitment<F>>(
     pk: &P::ProverKey,
     perm: &Permutation,
+) -> Result<BiPermIndex<F, P>, BiPermError<P::Error>> {
+    let ind_l = perm.half_indicator::<F>(true)?;
+    let ind_r = perm.half_indicator::<F>(false)?;
+    let ind_l_commit =
+        P::commit(pk, (&ind_l).into()).map_err(BiPermError::Pcs)?;
+    let ind_r_commit =
+        P::commit(pk, (&ind_r).into()).map_err(BiPermError::Pcs)?;
+    Ok((
+        BiPermProverIndex {
+            perm: perm.clone(),
+            ind_l,
+            ind_r,
+            ind_l_commit: ind_l_commit.clone(),
+            ind_r_commit: ind_r_commit.clone(),
+        },
+        BiPermVerifierIndex {
+            num_vars: perm.num_vars(),
+            ind_l_commit,
+            ind_r_commit,
+        },
+    ))
+}
+
+/// Prove $f(\sigma(x)) = g(x)$ for all $x \in B_\mu$.
+///
+/// Commits to $f, g$ via the PCS, absorbs the index and instance
+/// commitments into the transcript, then squeezes $\alpha$ so $\alpha$
+/// depends on both. After sumcheck rounds, opens $g$ at $\alpha$, $f$ at
+/// the sumcheck challenge $r$, and the committed indicators at
+/// $(r \Vert \alpha_{half})$, which equal $h_{L/R}(r)$ since partial
+/// evaluation commutes for MLEs. Put another way, we have
+/// extend-then-substitute = substitute-then-extend.
+pub fn prove<F: PrimeField, P: PolynomialCommitment<F>>(
+    pk: &P::ProverKey,
+    index: &BiPermProverIndex<F, P>,
     f: &DenseMultilinearExtension<F>,
     g: &DenseMultilinearExtension<F>,
     transcript: &mut Transcript,
 ) -> Result<BiPermProof<F, P>, BiPermError<P::Error>> {
-    let num_vars = perm.num_vars();
+    let num_vars = index.perm.num_vars();
     assert_eq!(num_vars, f.num_vars, "f num_vars must match μ");
     assert_eq!(num_vars, g.num_vars, "g num_vars must match μ");
-    let f_commit = P::commit(pk, f).map_err(BiPermError::Pcs)?;
-    let g_commit = P::commit(pk, g).map_err(BiPermError::Pcs)?;
+    let f_commit = P::commit(pk, f.into()).map_err(BiPermError::Pcs)?;
+    let g_commit = P::commit(pk, g.into()).map_err(BiPermError::Pcs)?;
+    transcript.append(b"ind_l_commit", &index.ind_l_commit);
+    transcript.append(b"ind_r_commit", &index.ind_r_commit);
     transcript.append(b"f_commit", &f_commit);
     transcript.append(b"g_commit", &g_commit);
     let alpha: Vec<F> = transcript.challenge_vec(b"alpha", num_vars);
     let (g_at_alpha, g_opening) =
-        P::open(pk, g, &alpha, transcript).map_err(BiPermError::Pcs)?;
+        P::open(pk, g.into(), &alpha, transcript).map_err(BiPermError::Pcs)?;
     let (alpha_l, alpha_r) = alpha.split_at(num_vars / 2);
-    let h_l_evals = indicator_table(perm, alpha_l, true)?;
-    let h_r_evals = indicator_table(perm, alpha_r, false)?;
+    let h_l_evals = indicator_table(&index.perm, alpha_l, true)?;
+    let h_r_evals = indicator_table(&index.perm, alpha_r, false)?;
     let h_l =
         DenseMultilinearExtension::from_evaluations_vec(num_vars, h_l_evals);
     let h_r =
         DenseMultilinearExtension::from_evaluations_vec(num_vars, h_r_evals);
     let output = sumcheck::prove(&[f.clone(), h_l, h_r], transcript);
-    let (f_at_r, f_opening) = P::open(pk, f, &output.challenges, transcript)
-        .map_err(BiPermError::Pcs)?;
+    let r = &output.challenges;
+    let (f_at_r, f_opening) =
+        P::open(pk, f.into(), r, transcript).map_err(BiPermError::Pcs)?;
+    let point_l: Vec<F> = r.iter().chain(alpha_l).copied().collect();
+    let point_r: Vec<F> = r.iter().chain(alpha_r).copied().collect();
+    let (ind_l_at_r, ind_l_opening) =
+        P::open(pk, (&index.ind_l).into(), &point_l, transcript)
+            .map_err(BiPermError::Pcs)?;
+    let (ind_r_at_r, ind_r_opening) =
+        P::open(pk, (&index.ind_r).into(), &point_r, transcript)
+            .map_err(BiPermError::Pcs)?;
     Ok(BiPermProof {
         f_commit,
         g_commit,
@@ -121,19 +199,25 @@ pub fn prove<F: PrimeField, P: PolynomialCommitment<F>>(
         g_opening,
         f_at_r,
         f_opening,
+        ind_l_at_r,
+        ind_l_opening,
+        ind_r_at_r,
+        ind_r_opening,
     })
 }
 
-/// Verify a BiPerm proof. The verifier holds only the PCS verifier key
-/// and the public permutation $\sigma$; $f$ and $g$ are accessible
-/// only through commitments and openings carried in the proof.
+/// Verify a BiPerm proof. The verifier holds only the PCS verifier key and
+/// the [`BiPermVerifierIndex`]; $f$, $g$, and the $\sigma$ indicators are
+/// accessible only through commitments and openings in the proof.
 pub fn verify<F: PrimeField, P: PolynomialCommitment<F>>(
     vk: &P::VerifierKey,
-    perm: &Permutation,
+    index: &BiPermVerifierIndex<F, P>,
     proof: &BiPermProof<F, P>,
     transcript: &mut Transcript,
 ) -> Result<(), BiPermError<P::Error>> {
-    let num_vars = perm.num_vars();
+    let num_vars = index.num_vars;
+    transcript.append(b"ind_l_commit", &index.ind_l_commit);
+    transcript.append(b"ind_r_commit", &index.ind_r_commit);
     transcript.append(b"f_commit", &proof.f_commit);
     transcript.append(b"g_commit", &proof.g_commit);
     let alpha: Vec<F> = transcript.challenge_vec(b"alpha", num_vars);
@@ -156,10 +240,11 @@ pub fn verify<F: PrimeField, P: PolynomialCommitment<F>>(
         &proof.sumcheck,
         transcript,
     )?;
+    let r = &out.challenges;
     let r_ok = P::verify(
         vk,
         &proof.f_commit,
-        &out.challenges,
+        r,
         proof.f_at_r,
         &proof.f_opening,
         transcript,
@@ -168,17 +253,36 @@ pub fn verify<F: PrimeField, P: PolynomialCommitment<F>>(
     if !r_ok {
         return Err(BiPermError::PcsVerifyFailed);
     }
+    // Verify the indicator openings
     let (alpha_l, alpha_r) = alpha.split_at(num_vars / 2);
-    let h_l_evals = indicator_table(perm, alpha_l, true)?;
-    let h_r_evals = indicator_table(perm, alpha_r, false)?;
-    let h_l =
-        DenseMultilinearExtension::from_evaluations_vec(num_vars, h_l_evals);
-    let h_r =
-        DenseMultilinearExtension::from_evaluations_vec(num_vars, h_r_evals);
-    let ind_l_at_r = ark_poly::Polynomial::evaluate(&h_l, &out.challenges);
-    let ind_r_at_r = ark_poly::Polynomial::evaluate(&h_r, &out.challenges);
+    let point_l: Vec<F> = r.iter().chain(alpha_l).copied().collect();
+    let point_r: Vec<F> = r.iter().chain(alpha_r).copied().collect();
+    let ind_l_ok = P::verify(
+        vk,
+        &index.ind_l_commit,
+        &point_l,
+        proof.ind_l_at_r,
+        &proof.ind_l_opening,
+        transcript,
+    )
+    .map_err(BiPermError::Pcs)?;
+    if !ind_l_ok {
+        return Err(BiPermError::PcsVerifyFailed);
+    }
+    let ind_r_ok = P::verify(
+        vk,
+        &index.ind_r_commit,
+        &point_r,
+        proof.ind_r_at_r,
+        &proof.ind_r_opening,
+        transcript,
+    )
+    .map_err(BiPermError::Pcs)?;
+    if !ind_r_ok {
+        return Err(BiPermError::PcsVerifyFailed);
+    }
 
-    if proof.f_at_r * ind_l_at_r * ind_r_at_r != out.final_claim {
+    if proof.f_at_r * proof.ind_l_at_r * proof.ind_r_at_r != out.final_claim {
         return Err(BiPermError::FinalCheckFailed);
     }
     Ok(())
@@ -222,17 +326,26 @@ mod tests {
         .unwrap()
     }
 
+    /// MockPcs setup sized for the largest committed
+    /// polynomial, the $3\mu/2$-variate indicators.
+    fn setup_keys(
+        perm: &Permutation,
+        rng: &mut impl ark_std::rand::RngCore,
+    ) -> ((), ()) {
+        MockPcs::<Fr>::setup(perm.num_vars() * 3 / 2, rng).unwrap()
+    }
+
     #[test]
     fn honest_round_trip() {
         let mut rng = test_rng();
         let perm = sample_perm();
         let (f, g) = consistent_pair(&perm, &mut rng);
-        let (pk, vk) = MockPcs::<Fr>::setup(perm.num_vars(), &mut rng).unwrap();
+        let (pk, vk) = setup_keys(&perm, &mut rng);
+        let (p_idx, v_idx) = index::<Fr, MockPcs<Fr>>(&pk, &perm).unwrap();
         let mut p_t = Transcript::new(b"biperm");
-        let proof: BiPermProof<Fr, MockPcs<Fr>> =
-            prove(&pk, &perm, &f, &g, &mut p_t).unwrap();
+        let proof = prove(&pk, &p_idx, &f, &g, &mut p_t).unwrap();
         let mut v_t = Transcript::new(b"biperm");
-        verify(&vk, &perm, &proof, &mut v_t).unwrap();
+        verify(&vk, &v_idx, &proof, &mut v_t).unwrap();
     }
 
     #[test]
@@ -248,14 +361,14 @@ mod tests {
             perm.num_vars(),
             bad_evals,
         );
-        let (pk, vk) = MockPcs::<Fr>::setup(perm.num_vars(), &mut rng).unwrap();
+        let (pk, vk) = setup_keys(&perm, &mut rng);
+        let (p_idx, v_idx) = index::<Fr, MockPcs<Fr>>(&pk, &perm).unwrap();
         let mut p_t = Transcript::new(b"biperm");
-        let proof: BiPermProof<Fr, MockPcs<Fr>> =
-            prove(&pk, &perm, &f, &g_bad, &mut p_t).unwrap();
+        let proof = prove(&pk, &p_idx, &f, &g_bad, &mut p_t).unwrap();
         // Verifier absorbs `g_bad`, gets a different $\alpha$ than the
         // prover, and the round-0 boundary check fails immediately.
         let mut v_t = Transcript::new(b"biperm");
-        let err = verify(&vk, &perm, &proof, &mut v_t).unwrap_err();
+        let err = verify(&vk, &v_idx, &proof, &mut v_t).unwrap_err();
         assert!(matches!(
             err,
             BiPermError::Sumcheck(SumcheckError::RoundCheckFailed { round: 0 }),
@@ -268,13 +381,13 @@ mod tests {
         let mut rng = test_rng();
         let perm = sample_perm();
         let (f, g) = consistent_pair(&perm, &mut rng);
-        let (pk, vk) = MockPcs::<Fr>::setup(perm.num_vars(), &mut rng).unwrap();
+        let (pk, vk) = setup_keys(&perm, &mut rng);
+        let (p_idx, v_idx) = index::<Fr, MockPcs<Fr>>(&pk, &perm).unwrap();
         let mut p_t = Transcript::new(b"biperm");
-        let mut proof: BiPermProof<Fr, MockPcs<Fr>> =
-            prove(&pk, &perm, &f, &g, &mut p_t).unwrap();
+        let mut proof = prove(&pk, &p_idx, &f, &g, &mut p_t).unwrap();
         proof.sumcheck.round_polys[1][0] += Fr::from(1u64);
         let mut v_t = Transcript::new(b"biperm");
-        let err = verify(&vk, &perm, &proof, &mut v_t).unwrap_err();
+        let err = verify(&vk, &v_idx, &proof, &mut v_t).unwrap_err();
         assert!(matches!(
             err,
             BiPermError::Sumcheck(SumcheckError::RoundCheckFailed { round: 1 }),
@@ -282,21 +395,40 @@ mod tests {
     }
 
     #[test]
-    fn rejects_wrong_perm() {
-        // $\sigma$ isn't (yet) absorbed into the transcript, so
-        // prover and verifier agree on $\alpha$ but produce different
-        // indicators, the final product check fails.
+    fn rejects_mismatched_index() {
+        // The indicator commitments are absorbed into the transcript, so a
+        // verifier holding a different $\sigma$'s index derives a different
+        // $\alpha$ and the $g$-opening check fails immediately.
         let mut rng = test_rng();
         let perm = sample_perm();
         let (f, g) = consistent_pair(&perm, &mut rng);
         // Canonical identity permutation, `0..perm.num_vars()`
         let other_perm = Permutation::identity(perm.num_vars());
-        let (pk, vk) = MockPcs::<Fr>::setup(perm.num_vars(), &mut rng).unwrap();
+        let (pk, vk) = setup_keys(&perm, &mut rng);
+        let (p_idx, _) = index::<Fr, MockPcs<Fr>>(&pk, &perm).unwrap();
+        let (_, v_idx_other) =
+            index::<Fr, MockPcs<Fr>>(&pk, &other_perm).unwrap();
         let mut p_t = Transcript::new(b"biperm");
-        let proof: BiPermProof<Fr, MockPcs<Fr>> =
-            prove(&pk, &perm, &f, &g, &mut p_t).unwrap();
+        let proof = prove(&pk, &p_idx, &f, &g, &mut p_t).unwrap();
         let mut v_t = Transcript::new(b"biperm");
-        let err = verify(&vk, &other_perm, &proof, &mut v_t).unwrap_err();
-        assert!(matches!(err, BiPermError::FinalCheckFailed));
+        let err = verify(&vk, &v_idx_other, &proof, &mut v_t).unwrap_err();
+        assert!(matches!(err, BiPermError::PcsVerifyFailed));
+    }
+
+    #[test]
+    // A forged indicator value must fail against the
+    // preprocessed commitment, not be taken on faith.
+    fn rejects_tampered_indicator_opening() {
+        let mut rng = test_rng();
+        let perm = sample_perm();
+        let (f, g) = consistent_pair(&perm, &mut rng);
+        let (pk, vk) = setup_keys(&perm, &mut rng);
+        let (p_idx, v_idx) = index::<Fr, MockPcs<Fr>>(&pk, &perm).unwrap();
+        let mut p_t = Transcript::new(b"biperm");
+        let mut proof = prove(&pk, &p_idx, &f, &g, &mut p_t).unwrap();
+        proof.ind_l_at_r += Fr::from(1u64);
+        let mut v_t = Transcript::new(b"biperm");
+        let err = verify(&vk, &v_idx, &proof, &mut v_t).unwrap_err();
+        assert!(matches!(err, BiPermError::PcsVerifyFailed));
     }
 }

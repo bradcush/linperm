@@ -15,11 +15,11 @@ fn public_api_round_trips() {
     let evals: Vec<Fr> = perm.bit_evaluations(0);
     let poly = DenseMultilinearExtension::from_evaluations_vec(num_vars, evals);
     let (pk, vk) = MockPcs::<Fr>::setup(num_vars, &mut rng).unwrap();
-    let commitment = MockPcs::commit(&pk, &poly).unwrap();
+    let commitment = MockPcs::commit(&pk, (&poly).into()).unwrap();
     let point: Vec<Fr> = (0..num_vars).map(|_| Fr::rand(&mut rng)).collect();
     let mut prover_t = Transcript::new(b"integration");
     let (value, proof) =
-        MockPcs::open(&pk, &poly, &point, &mut prover_t).unwrap();
+        MockPcs::open(&pk, (&poly).into(), &point, &mut prover_t).unwrap();
     let mut verifier_t = Transcript::new(b"integration");
     assert!(MockPcs::verify(
         &vk,

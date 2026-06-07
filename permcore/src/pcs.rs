@@ -13,11 +13,70 @@ use core::convert::Infallible;
 use core::marker::PhantomData;
 
 use ark_ff::PrimeField;
-use ark_poly::{DenseMultilinearExtension, Polynomial};
+use ark_poly::{
+    DenseMultilinearExtension, MultilinearExtension, Polynomial,
+    SparseMultilinearExtension,
+};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::RngCore;
 
 use crate::transcript::Transcript;
+
+/// Borrowed multilinear polynomial in either representation. Both variants
+/// denote the same mathematical object, a multilinear polynomial given by its
+/// evaluations over $B_\mu$. We only support both for benchmarking.
+#[derive(Clone, Copy)]
+pub enum MleRef<'a, F: PrimeField> {
+    Dense(&'a DenseMultilinearExtension<F>),
+    Sparse(&'a SparseMultilinearExtension<F>),
+}
+
+impl<F: PrimeField> MleRef<'_, F> {
+    /// Number of variables $\mu$.
+    pub fn num_vars(&self) -> usize {
+        match self {
+            Self::Dense(poly) => poly.num_vars,
+            Self::Sparse(poly) => poly.num_vars,
+        }
+    }
+
+    /// Evaluate at `point`, `num_vars()` coordinates.
+    pub fn evaluate(&self, point: &[F]) -> F {
+        match self {
+            Self::Dense(poly) => poly.evaluate(&point.to_vec()),
+            Self::Sparse(poly) => poly.evaluate(&point.to_vec()),
+        }
+    }
+
+    /// Dense evaluation table, $O(2^\mu)$ time and memory either way.
+    pub fn to_dense(&self) -> DenseMultilinearExtension<F> {
+        match self {
+            Self::Dense(poly) => (*poly).clone(),
+            Self::Sparse(poly) => {
+                DenseMultilinearExtension::from_evaluations_vec(
+                    poly.num_vars,
+                    poly.to_evaluations(),
+                )
+            }
+        }
+    }
+}
+
+impl<'a, F: PrimeField> From<&'a DenseMultilinearExtension<F>>
+    for MleRef<'a, F>
+{
+    fn from(poly: &'a DenseMultilinearExtension<F>) -> Self {
+        Self::Dense(poly)
+    }
+}
+
+impl<'a, F: PrimeField> From<&'a SparseMultilinearExtension<F>>
+    for MleRef<'a, F>
+{
+    fn from(poly: &'a SparseMultilinearExtension<F>) -> Self {
+        Self::Sparse(poly)
+    }
+}
 
 /// A multilinear polynomial commitment scheme.
 ///
@@ -40,16 +99,18 @@ pub trait PolynomialCommitment<F: PrimeField> {
         rng: &mut R,
     ) -> Result<(Self::ProverKey, Self::VerifierKey), Self::Error>;
 
-    /// Commit to a multilinear polynomial.
+    /// Commit to a multilinear polynomial. Commitments must bind the
+    /// polynomial, not its representation, so a sparse polynomial
+    /// and its densification will commit identically.
     fn commit(
         pk: &Self::ProverKey,
-        poly: &DenseMultilinearExtension<F>,
+        poly: MleRef<'_, F>,
     ) -> Result<Self::Commitment, Self::Error>;
 
     /// Prove an evaluation `poly(point) = value` and return both.
     fn open(
         pk: &Self::ProverKey,
-        poly: &DenseMultilinearExtension<F>,
+        poly: MleRef<'_, F>,
         point: &[F],
         transcript: &mut Transcript,
         // Returning the point w/ its proof
@@ -88,18 +149,20 @@ impl<F: PrimeField> PolynomialCommitment<F> for MockPcs<F> {
 
     fn commit(
         _pk: &Self::ProverKey,
-        poly: &DenseMultilinearExtension<F>,
+        poly: MleRef<'_, F>,
     ) -> Result<Self::Commitment, Self::Error> {
-        Ok(poly.clone())
+        // Densifying makes the commitment
+        // representation-independent.
+        Ok(poly.to_dense())
     }
 
     fn open(
         _pk: &Self::ProverKey,
-        poly: &DenseMultilinearExtension<F>,
+        poly: MleRef<'_, F>,
         point: &[F],
         _transcript: &mut Transcript,
     ) -> Result<(F, Self::Proof), Self::Error> {
-        Ok((poly.evaluate(&point.to_vec()), ()))
+        Ok((poly.evaluate(point), ()))
     }
 
     fn verify(
@@ -133,7 +196,7 @@ mod tests {
             DenseMultilinearExtension::from_evaluations_vec(num_vars, evals);
 
         let (pk, vk) = MockPcs::<Fr>::setup(num_vars, &mut rng).unwrap();
-        let comm = MockPcs::commit(&pk, &poly).unwrap();
+        let comm = MockPcs::commit(&pk, (&poly).into()).unwrap();
 
         // Random point $\alpha \in F^3$
         let point: Vec<Fr> =
@@ -144,7 +207,7 @@ mod tests {
         // Domain separation is absorption the first transcript.
         let mut prover_t = Transcript::new(b"mock");
         let (value, proof) =
-            MockPcs::open(&pk, &poly, &point, &mut prover_t).unwrap();
+            MockPcs::open(&pk, (&poly).into(), &point, &mut prover_t).unwrap();
 
         // Real backends do pairing checks / inner-product
         // checks against comm without ever seeing poly
@@ -172,5 +235,30 @@ mod tests {
             &mut verifier_t
         )
         .unwrap());
+    }
+
+    #[test]
+    // Commitments bind the polynomial, not the
+    // representation it was handed over in.
+    fn sparse_and_dense_commit_identically() {
+        let mut rng = test_rng();
+        let num_vars = 4;
+        let entries = [(3usize, Fr::rand(&mut rng)), (9, Fr::rand(&mut rng))];
+        let sparse =
+            SparseMultilinearExtension::from_evaluations(num_vars, &entries);
+        let dense = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            sparse.to_evaluations(),
+        );
+        let (pk, _vk) = MockPcs::<Fr>::setup(num_vars, &mut rng).unwrap();
+        let c_sparse = MockPcs::commit(&pk, (&sparse).into()).unwrap();
+        let c_dense = MockPcs::commit(&pk, (&dense).into()).unwrap();
+        assert_eq!(c_sparse, c_dense);
+        let point: Vec<Fr> =
+            (0..num_vars).map(|_| Fr::rand(&mut rng)).collect();
+        assert_eq!(
+            MleRef::from(&sparse).evaluate(&point),
+            MleRef::from(&dense).evaluate(&point),
+        );
     }
 }

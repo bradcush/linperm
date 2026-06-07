@@ -5,6 +5,8 @@
 
 use alloc::vec::Vec;
 
+use ark_poly::SparseMultilinearExtension;
+
 use crate::error::CoreError;
 
 /// A permutation $\sigma : B_\mu → B_\mu$,
@@ -115,6 +117,38 @@ impl Permutation {
         Ok((y & mask, (y >> half) & mask))
     }
 
+    /// The sparse MLE of the BiPerm half-indicator
+    /// $\tilde{\mathbb{1}}_{\sigma_{half}}(X, Y)$ over $\mu + \mu/2$
+    /// variables: $1$ at $(x, \sigma_{half}(x))$ for each $x \in B_\mu$
+    /// and $0$ elsewhere. $X$ occupies variables $[0, \mu)$ and $Y$
+    /// occupies $[\mu, 3\mu/2)$ in little-endian order, so the nonzero
+    /// entry for $x$ sits at index $x + 2^\mu \cdot \sigma_{half}(x)$.
+    /// That's $n$ nonzero entries out of $n^{1.5}$ total, the reason the
+    /// PCS committing this must be sparse-friendly for linear prover.
+    ///
+    /// Returns an error if $\mu$ is odd.
+    pub fn half_indicator<F: ark_ff::Field>(
+        &self,
+        use_left_half: bool,
+    ) -> Result<SparseMultilinearExtension<F>, CoreError> {
+        // There are `self.size()` = $2^\mu$ entries which have a value 1 in
+        // our "table" of size $2^\mu \times 2^{\mu/2}$, one value in each row.
+        // Here we're just setting those 1s for specific table entries.
+        // Each row has exactly one 1 at column $\sigma_{half}(x)$.
+        // This is when $y = \sigma{half}(x)$ for some half.
+        let entries = (0..self.size())
+            .map(|x| {
+                let (lo, hi) = self.halves(x)?;
+                let y = if use_left_half { lo } else { hi };
+                Ok((x | (y << self.num_vars), F::one()))
+            })
+            .collect::<Result<Vec<_>, CoreError>>()?;
+        Ok(SparseMultilinearExtension::from_evaluations(
+            self.num_vars + self.num_vars / 2,
+            &entries,
+        ))
+    }
+
     /// $\sigma$ projected onto group $j \in [0, \ell)$ of
     /// width $\mu/\ell$, used by MulPerm. The output has
     /// $\mu/\ell$ bits packed in little-endian order.
@@ -206,6 +240,77 @@ mod tests {
         for x in 0..perm.size() {
             let (lo, hi) = perm.halves(x).unwrap();
             assert_eq!(lo | (hi << (perm.num_vars() / 2)), perm.apply(x));
+        }
+    }
+
+    #[test]
+    fn half_indicator_rejects_odd_num_vars() {
+        let perm =
+            Permutation::new(alloc::vec![5, 3, 7, 1, 0, 6, 2, 4]).unwrap();
+        assert!(matches!(
+            perm.half_indicator::<ark_bn254::Fr>(true),
+            Err(CoreError::OddNumVars { num_vars: 3 })
+        ));
+    }
+
+    #[test]
+    fn half_indicator_nonzeros_match_halves() {
+        use ark_bn254::Fr;
+        let perm = Permutation::new(alloc::vec![
+            5, 3, 7, 1, 0, 6, 2, 4, 9, 11, 8, 10, 13, 15, 12, 14
+        ])
+        .unwrap();
+        let mu = perm.num_vars();
+        for use_left in [true, false] {
+            let ind = perm.half_indicator::<Fr>(use_left).unwrap();
+            assert_eq!(ind.num_vars, mu + mu / 2);
+            assert_eq!(ind.evaluations.len(), perm.size());
+            // Doing the exact same thing as `perm.half_indicator()`,
+            // but that implementation can change so it's fine.
+            for x in 0..perm.size() {
+                let (lo, hi) = perm.halves(x).unwrap();
+                let y = if use_left { lo } else { hi };
+                assert_eq!(
+                    ind.evaluations.get(&(x | (y << mu))),
+                    Some(&Fr::from(1u64)),
+                );
+            }
+        }
+    }
+
+    #[test]
+    // The identity the indexed BiPerm verifier relies on:
+    // $\tilde{\mathbb{1}}_{\sigma_{half}}(r, \alpha) = h(r)$ where $h(X)$
+    // is the MLE of $x \mapsto eq(\sigma_{half}(x), \alpha)$. Opening the
+    // committed indicator at $(r \| \alpha)$ must equal the partial
+    // evaluation the sumcheck final check needs. Partial in the sense
+    // we fix $\alpha \in Y$, and evaluate over a $\mu$-variate polynomial.
+    // We can commit to the indicator sine it's flexible in $\alpha$.
+    fn half_indicator_partial_evaluation_matches_eq_table() {
+        use ark_bn254::Fr;
+        use ark_ff::UniformRand;
+        use ark_poly::{DenseMultilinearExtension, Polynomial};
+        let mut rng = ark_std::test_rng();
+        let perm = Permutation::new(alloc::vec![
+            5, 3, 7, 1, 0, 6, 2, 4, 9, 11, 8, 10, 13, 15, 12, 14
+        ])
+        .unwrap();
+        let mu = perm.num_vars();
+        let r: Vec<Fr> = (0..mu).map(|_| Fr::rand(&mut rng)).collect();
+        let alpha: Vec<Fr> = (0..mu / 2).map(|_| Fr::rand(&mut rng)).collect();
+        let point: Vec<Fr> = r.iter().chain(&alpha).copied().collect();
+        for use_left in [true, false] {
+            let ind = perm.half_indicator::<Fr>(use_left).unwrap();
+            let eq_t = crate::eq::eq_eval_table::<Fr>(&alpha);
+            let h_evals: Vec<Fr> = (0..perm.size())
+                .map(|x| {
+                    let (lo, hi) = perm.halves(x).unwrap();
+                    eq_t[if use_left { lo } else { hi }]
+                })
+                .collect();
+            let h =
+                DenseMultilinearExtension::from_evaluations_vec(mu, h_evals);
+            assert_eq!(ind.evaluate(&point), h.evaluate(&r));
         }
     }
 
