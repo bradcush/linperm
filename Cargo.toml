@@ -1,5 +1,5 @@
 [workspace]
-members = ["permcore", "biperm", "mulperm"]
+members = ["permcore", "biperm", "mulperm", "hyrax"]
 resolver = "2"
 
 [workspace.package]
@@ -22,3 +22,4 @@ criterion = { version = "0.5", default-features = false }
 permcore = { path = "permcore" }
 biperm = { path = "biperm" }
 mulperm = { path = "mulperm" }
+hyrax = { path = "hyrax" }

@@ -139,6 +139,8 @@ cargo fmt --check
   - permutation type, equality polynomial, Fiat-Shamir transcript, PCS trait
 - `biperm`: BiPerm implementation, library crate
 - `mulperm`: MulPerm implementation, library crate
+- `hyrax`: Hyrax PCS backend, library crate
+  - binding-only, dense; for now
 
 ## Plan
 
@@ -184,8 +186,9 @@ cargo fmt --check
 ``` txt
 linperm/
 ├── permcore/       # Shared building blocks
-├── biperm/         # Currently re-exports permcore
-└── mulperm/        # Currently re-exports permcore
+├── biperm/         # BiPerm prove/verify (indexed)
+├── mulperm/        # Currently re-exports permcore
+└── hyrax/          # Hyrax PCS backend (dense)
 ```
 
 ### Rust specifics

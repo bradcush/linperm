@@ -1,25 +1,36 @@
 [package]
-name = "biperm"
+name = "hyrax"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "BiPerm"
+description = "Hyrax multilinear PCS (backend)"
 
 [dependencies]
 permcore.workspace = true
 ark-ff.workspace = true
+ark-ec.workspace = true
 ark-poly.workspace = true
 ark-std.workspace = true
 
 [dev-dependencies]
-hyrax.workspace = true
 ark-bn254.workspace = true
-ark-ec.workspace = true
 ark-std = { workspace = true, features = ["std"] }
 
 [features]
 default = ["std"]
-std = ["permcore/std"]
-parallel = ["permcore/parallel"]
+std = [
+    "permcore/std",
+    "ark-ff/std",
+    "ark-ec/std",
+    "ark-poly/std",
+    "ark-std/std",
+]
+parallel = [
+    "permcore/parallel",
+    "ark-ff/parallel",
+    "ark-ec/parallel",
+    "ark-poly/parallel",
+    "ark-std/parallel",
+]
