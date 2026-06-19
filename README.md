@@ -24,9 +24,14 @@ recommended for use in production systems. Use at your own risk.
 
 ## Example
 
+This example comes directly from integration tests in BiPerm and shows what the
+full protocol looks like using the Hyrax PCS. For an annotated implementation,
+see that source. Integration tests also contain the full protocol using a
+`MockPcs`, which are just full polynomials.
+
 ``` rs
 // biperm/tests/integration.rs
-use ark_bn254::Fr;
+use ark_bn254::{Fr, G1Projective};
 use ark_ff::UniformRand;
 use ark_poly::DenseMultilinearExtension;
 use ark_std::test_rng;
@@ -35,25 +40,39 @@ use biperm::permcore::{
     MockPcs, Permutation, PolynomialCommitment, Transcript,
 };
 use biperm::{index, prove, verify};
+use hyrax::Hyrax;
 
-#[test]
-fn biperm_round_trip() {
-    let mut rng = test_rng();
+fn instance(
+    rng: &mut impl ark_std::rand::RngCore,
+) -> (
+    Permutation,
+    DenseMultilinearExtension<Fr>,
+    DenseMultilinearExtension<Fr>,
+) {
     let perm = Permutation::new(vec![
         5, 3, 7, 1, 0, 6, 2, 4, 9, 11, 8, 10, 13, 15, 12, 14,
     ])
     .unwrap();
     let num_vars = perm.num_vars();
     let f_evals: Vec<Fr> =
-        (0..(1 << num_vars)).map(|_| Fr::rand(&mut rng)).collect();
+        (0..(1 << num_vars)).map(|_| Fr::rand(rng)).collect();
     let mut g_evals = vec![Fr::from(0u64); perm.size()];
     for x in 0..perm.size() {
         g_evals[perm.apply(x)] = f_evals[x];
     }
     let f = DenseMultilinearExtension::from_evaluations_vec(num_vars, f_evals);
     let g = DenseMultilinearExtension::from_evaluations_vec(num_vars, g_evals);
-    let (pk, vk) = MockPcs::<Fr>::setup(num_vars * 3 / 2, &mut rng).unwrap();
-    let (p_idx, v_idx) = index::<Fr, MockPcs<Fr>>(&pk, &perm).unwrap();
+    (perm, f, g)
+}
+
+#[test]
+fn biperm_round_trip() {
+    let mut rng = test_rng();
+    let (perm, f, g) = instance(&mut rng);
+    let (pk, vk) =
+        Hyrax::<G1Projective>::setup(perm.num_vars() * 3 / 2, &mut rng)
+            .unwrap();
+    let (p_idx, v_idx) = index::<Fr, Hyrax<G1Projective>>(&pk, &perm).unwrap();
     let mut prover_t = Transcript::new(b"integration");
     let proof = prove(&pk, &p_idx, &f, &g, &mut prover_t).unwrap();
     let mut verifier_t = Transcript::new(b"integration");
@@ -69,13 +88,8 @@ fn biperm_round_trip() {
 ## Building
 
 ``` sh
+# Optionally w/ --release
 cargo build
-```
-
-## Running
-
-``` sh
-cargo run
 ```
 
 ## Testing
@@ -144,7 +158,7 @@ cargo fmt --check
 
 ## Plan
 
-- Use AI to assist in building first version
+- Use AI to assist in building a first version
 - Walk though decisions, understand why's, what's best
 - Separate dependency libs (internal/external) from paper code
 - Specify learning in SKILL.md format to run through again
@@ -171,13 +185,11 @@ cargo fmt --check
 
 ## Implementation
 
-- Both BiPerm/MulPerm need custom variant of sumcheck
-  - That's the point of this work, creating these variants
-- PCS starting w/ a `MockPCS` for Trait (swap later)
+- PCS started w/ a `MockPcs` for Trait (introduced Hyrax)
 - BN254 field/curve, **pairing friendly**, every PCS in paper needs that
   - [ ] Read more about this curve, details of it, why we choose it
 - [ ] Multiple small crates (mirrors Hyperplonk layout)
-- [ ] Not sure what transcript (merlin/spongefish) refers to
+- [ ] We use (merlin/spongefish), do we want others?
 
 > Ethereum precompiles (EIP-196/197).<br>
 > BLS12-381 is the obvious upgrade if we ever need $\geq$ 128-bit security.<br>
@@ -191,20 +203,14 @@ linperm/
 └── hyrax/          # Hyrax PCS backend (dense)
 ```
 
-### Rust specifics
-
-- `no_std` opt-in for some libs, forgot exact meaning
-- `eq` stuff builds evaluation table over the boolean hypercube
-  - [ ] Layout matches `ark-poly`s little-endian, why LE?
-- [ ] A lot of helpers already doing some heavy lifting
-- PCS (Setup / Commit / Open / Verify, transcript-aware)
-
 ## Deferred work
 
-- Sumcheck per MulPerm
-- Prover/verifier for MulPerm
-- PCS backend support (eg. Hyrax, Multi-linear KZG)
-- Benchmarks by itself, w/ HyperPlonk
+- [x] Sumcheck per MulPerm
+- [ ] Prover/verifier for MulPerm
+- [ ] PCS backend support (eg. Hyrax, Multi-linear KZG)
+  - [x] Hyrax (Dense, trusted-setup, binding-only)
+  - [ ] Hyrax (Sparse, transparent, hiding)
+- [ ] Benchmarks by itself, w/ HyperPlonk
 
 ### Optional
 
@@ -216,4 +222,4 @@ linperm/
 
 ## Skills
 
-- `/initialize-linperm`: Bootstrap project
+`/initialize-linperm`: Bootstrap project
