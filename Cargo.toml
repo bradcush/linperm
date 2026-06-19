@@ -17,7 +17,11 @@ ark-serialize = { version = "0.5", default-features = false, features = ["derive
 ark-bn254 = { version = "0.5", default-features = false, features = ["curve"] }
 ark-std = { version = "0.5", default-features = false }
 merlin = { version = "3", default-features = false }
-criterion = { version = "0.5", default-features = false }
+criterion = { version = "0.5", default-features = false, features = [
+    "html_reports",
+    "plotters",
+    "cargo_bench_support",
+] }
 
 permcore = { path = "permcore" }
 biperm = { path = "biperm" }

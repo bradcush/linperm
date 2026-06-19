@@ -16,8 +16,17 @@ ark-std.workspace = true
 [dev-dependencies]
 hyrax.workspace = true
 ark-bn254.workspace = true
-ark-ec.workspace = true
+ark-serialize.workspace = true
 ark-std = { workspace = true, features = ["std"] }
+criterion.workspace = true
+
+[[bench]]
+name = "verify"
+harness = false
+
+[[bench]]
+name = "prove"
+harness = false
 
 [features]
 default = ["std"]
