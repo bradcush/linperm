@@ -26,7 +26,15 @@ name = "verify"
 harness = false
 
 [[bench]]
+name = "index"
+harness = false
+
+[[bench]]
 name = "prove"
+harness = false
+
+[[bench]]
+name = "phases"
 harness = false
 
 [features]

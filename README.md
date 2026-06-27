@@ -115,10 +115,40 @@ cargo clippy --all-targets -- -D warnings
 
 ## Benchmarks
 
-Criterion-based, runs full measurement loops:
+Runs full measurement loops:
 
 ``` sh
 cargo bench
+```
+
+### Baselines
+
+Criterion can snapshot a run and diff:
+
+``` sh
+# Snapshot the index bench, currently dense
+cargo bench --bench index -- --save-baseline dense
+```
+
+After a change, compare against it:
+
+``` sh
+# Compare current index against baseline
+cargo bench --bench index -- --baseline dense
+```
+
+### Phase breakdown
+
+A non-Criterion report (`harness = false`) for each `index` phase's share
+of the call per PCS scheme and $\mu$. The two phases are `aux_gen` (auxiliary
+generation, building the sparse indicator polynomials from $\sigma$) and
+`commit` (PCS-committing them), "assemble" is ignored.
+
+``` sh
+cargo bench --bench phases
+
+# Render as a table
+scripts/phases-table.sh
 ```
 
 ### Flamegraphs
@@ -135,7 +165,7 @@ cargo bench -- --profile-time=8
 
 # Profile one id for 8s; single path example
 # target/criterion/<group>/<id>/profile/flamegraph.svg
-cargo bench --bench prove -- --profile-time=8 'biperm_index/hyrax/12'
+cargo bench --bench index -- --profile-time=8 'biperm_index/hyrax/12'
 ```
 
 ## Documentation
@@ -217,7 +247,8 @@ linperm/
 ├── permcore/       # Shared building blocks
 ├── biperm/         # BiPerm prove/verify (indexed)
 ├── mulperm/        # Currently re-exports permcore
-└── hyrax/          # Hyrax PCS backend (dense)
+├── hyrax/          # Hyrax PCS backend (dense)
+└── scripts/        # Developer tooling
 ```
 
 ## Deferred work

@@ -1,4 +1,5 @@
 mod common;
+mod config;
 
 use ark_bn254::{Fr, G1Projective};
 use ark_poly::DenseMultilinearExtension;
@@ -102,7 +103,7 @@ fn bench(c: &mut Criterion) {
 
 criterion_group! {
     name = benches;
-    config = common::criterion();
+    config = config::profiled();
     targets = bench
 }
 criterion_main!(benches);
