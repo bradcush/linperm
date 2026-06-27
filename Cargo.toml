@@ -22,8 +22,14 @@ criterion = { version = "0.5", default-features = false, features = [
     "plotters",
     "cargo_bench_support",
 ] }
+pprof = { version = "0.13", default-features = false }
 
 permcore = { path = "permcore" }
 biperm = { path = "biperm" }
 mulperm = { path = "mulperm" }
 hyrax = { path = "hyrax" }
+
+# Symbolized frames for bench flamegraphs (pprof under `--profile-time`).
+# Affects only the optimized bench build's debug info, not results.
+[profile.bench]
+debug = true

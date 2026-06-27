@@ -121,6 +121,23 @@ Criterion-based, runs full measurement loops:
 cargo bench
 ```
 
+### Flamegraphs
+
+*Width is time, vertical is call depth.*
+
+The benches double as profiling targets via `pprof`. Passing `--profile-time`
+skips the timing analysis and samples the timed closure instead, writing an SVG
+per benchmark id or filtering to a single id.
+
+``` sh
+# Profile all, each 8s
+cargo bench -- --profile-time=8
+
+# Profile one id for 8s; single path example
+# target/criterion/<group>/<id>/profile/flamegraph.svg
+cargo bench --bench prove -- --profile-time=8 'biperm_index/hyrax/12'
+```
+
 ## Documentation
 
 From `///` doc comments. LaTeX in doc comments is rendered by KaTeX, wired in

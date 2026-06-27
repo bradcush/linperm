@@ -86,5 +86,9 @@ fn bench(c: &mut Criterion) {
     prv.finish();
 }
 
-criterion_group!(benches, bench);
+criterion_group! {
+    name = benches;
+    config = common::criterion();
+    targets = bench
+}
 criterion_main!(benches);

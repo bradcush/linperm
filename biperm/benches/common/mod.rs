@@ -4,8 +4,18 @@ use ark_bn254::Fr;
 use ark_ff::UniformRand;
 use ark_poly::DenseMultilinearExtension;
 use ark_std::rand::RngCore;
+use criterion::Criterion;
+use pprof::criterion::{Output, PProfProfiler};
 
 use biperm::permcore::Permutation;
+
+/// Criterion configured to emit a flamegraph of the timed closure under
+/// `--profile-time`. Sampling at 100 Hz; the profiler is dormant on normal
+/// `cargo bench` runs, so timing/report output is unaffected.
+pub fn criterion() -> Criterion {
+    Criterion::default()
+        .with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)))
+}
 
 /// Create an instance for benchmarking,
 /// the permutation and dense MLEs.
