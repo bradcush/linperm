@@ -29,7 +29,7 @@ fn bench(c: &mut Criterion) {
     // `index` preprocesses $\sigma$ once, builds + commits the
     // two $n^{1.5}$ indicators. The dense-Hyrax commit dominates,
     // so keep μ modest. Even μ only (BiPerm requires it).
-    const MUS: [usize; 3] = [8, 10, 12];
+    const MUS: [usize; 4] = [8, 10, 12, 14];
 
     let mut idx = c.benchmark_group("biperm_index");
     // The dense Hyrax MSM is slow;

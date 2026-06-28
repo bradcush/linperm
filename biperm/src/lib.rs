@@ -30,6 +30,7 @@ use ark_poly::{DenseMultilinearExtension, SparseMultilinearExtension};
 use permcore::eq::eq_eval_table;
 use permcore::sumcheck::{self, SumcheckError, SumcheckProof};
 use permcore::{CoreError, Permutation, PolynomialCommitment, Transcript};
+use tracing::info_span;
 
 /// Perm proof: PCS commitments to $f, g$, the sumcheck transcript, and PCS
 /// openings of $g$ at $\alpha$, $f$ at the sumcheck challenge $r$, and the
@@ -163,34 +164,47 @@ pub fn prove<F: PrimeField, P: PolynomialCommitment<F>>(
     let num_vars = index.perm.num_vars();
     assert_eq!(num_vars, f.num_vars, "f num_vars must match μ");
     assert_eq!(num_vars, g.num_vars, "g num_vars must match μ");
+    // Span names group the bench phase breakdown
+    let commit_span = info_span!("commit").entered();
     let f_commit = P::commit(pk, f.into()).map_err(BiPermError::Pcs)?;
     let g_commit = P::commit(pk, g.into()).map_err(BiPermError::Pcs)?;
+    drop(commit_span);
     transcript.append(b"ind_l_commit", &index.ind_l_commit);
     transcript.append(b"ind_r_commit", &index.ind_r_commit);
     transcript.append(b"f_commit", &f_commit);
     transcript.append(b"g_commit", &g_commit);
     let alpha: Vec<F> = transcript.challenge_vec(b"alpha", num_vars);
+    let opens_span = info_span!("opens").entered();
     let (g_at_alpha, g_opening) =
         P::open(pk, g.into(), &alpha, transcript).map_err(BiPermError::Pcs)?;
+    drop(opens_span);
     let (alpha_l, alpha_r) = alpha.split_at(num_vars / 2);
+    let aux_span = info_span!("aux").entered();
     let h_l_evals = indicator_table(&index.perm, alpha_l, true)?;
     let h_r_evals = indicator_table(&index.perm, alpha_r, false)?;
     let h_l =
         DenseMultilinearExtension::from_evaluations_vec(num_vars, h_l_evals);
     let h_r =
         DenseMultilinearExtension::from_evaluations_vec(num_vars, h_r_evals);
+    drop(aux_span);
+    let sumcheck_span = info_span!("sumcheck").entered();
     let output = sumcheck::prove(&[f.clone(), h_l, h_r], transcript);
+    drop(sumcheck_span);
     let r = &output.challenges;
+    let opens_span = info_span!("opens").entered();
     let (f_at_r, f_opening) =
         P::open(pk, f.into(), r, transcript).map_err(BiPermError::Pcs)?;
+    drop(opens_span);
     let point_l: Vec<F> = r.iter().chain(alpha_l).copied().collect();
     let point_r: Vec<F> = r.iter().chain(alpha_r).copied().collect();
+    let opens_span = info_span!("opens").entered();
     let (ind_l_at_r, ind_l_opening) =
         P::open(pk, (&index.ind_l).into(), &point_l, transcript)
             .map_err(BiPermError::Pcs)?;
     let (ind_r_at_r, ind_r_opening) =
         P::open(pk, (&index.ind_r).into(), &point_r, transcript)
             .map_err(BiPermError::Pcs)?;
+    drop(opens_span);
     Ok(BiPermProof {
         f_commit,
         g_commit,

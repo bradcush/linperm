@@ -139,16 +139,26 @@ cargo bench --bench index -- --baseline dense
 
 ### Phase breakdown
 
-A non-Criterion report (`harness = false`) for each `index` phase's share
-of the call per PCS scheme and $\mu$. The two phases are `aux_gen` (auxiliary
-generation, building the sparse indicator polynomials from $\sigma$) and
-`commit` (PCS-committing them), "assemble" is ignored.
+A non-Criterion report (`harness = false`) for each phase's share of the call
+per PCS scheme and $\mu$, raw ms to `target/`; scripts derive the percentages.
+
+For `index`, the two phases are `aux_gen` (auxiliary generation, building the
+sparse indicator polynomials from $\sigma$) and `commit` (PCS-committing them),
+"assemble" is ignored. They have no mid-call challenges, so the bench
+reconstructs them by re-calling the public steps.
+
+`prove` squeezes $\alpha$ and the sumcheck $r$ mid-call, so its phases can't be
+reconstructed externally; it's instrumented in-place with `tracing` spans (no-op
+without a subscriber) that the bench's capturing layer times. The phases are
+`commit`, `aux`, `sumcheck`, and `opens` (the three PCS opens summed via a
+shared span name).
 
 ``` sh
 cargo bench --bench phases
 
-# Render as a table
-scripts/phases-table.sh
+# Render as tables
+scripts/index-phases-table.sh
+scripts/prove-phases-table.sh
 ```
 
 ### Flamegraphs

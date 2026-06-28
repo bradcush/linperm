@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
-# Render the phase-breakdown table from target/phases.csv,
+# Render the index phase-breakdown table from target/index_phases.csv,
 # the raw numbers written by `cargo bench --bench phases`.
 # Percentages are derived here from the raw ms.
 #
-# Usage: scripts/phases-table.sh [path-to-csv]
+# Usage: scripts/index-phases-table.sh [path-to-csv]
 set -euo pipefail
 
-csv="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/target/phases.csv}"
+csv="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/target/index_phases.csv}"
 
 if [[ ! -f $csv ]]; then
   echo "no CSV at $csv; run: cargo bench --bench phases" >&2

@@ -32,9 +32,12 @@ fn prover_index<P: PolynomialCommitment<Fr>>(
 fn bench(c: &mut Criterion) {
     // Commit f/g, sumcheck, open f/g + indicators. Keep μ modest, dense
     // commit/open is in the hot loop. Even $\mu$ only (BiPerm requires).
-    const MUS: [usize; 3] = [8, 10, 12];
+    const MUS: [usize; 4] = [8, 10, 12, 14];
 
     let mut prv = c.benchmark_group("biperm_prove");
+    // The dense Hyrax commit/open is slow;
+    // 10 keeps wall-clock sane
+    prv.sample_size(10);
     for mu in MUS {
         let mut rng = test_rng();
         let (perm, f, g) = instance(mu, &mut rng);
