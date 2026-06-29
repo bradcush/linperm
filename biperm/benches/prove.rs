@@ -13,7 +13,7 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use biperm::permcore::{
     MockPcs, Permutation, PolynomialCommitment, Transcript,
 };
-use biperm::{index, prove, BiPermProverIndex};
+use biperm::{index, index_with, prove, BiPermProverIndex, IndicatorRepr};
 use hyrax::Hyrax;
 
 use common::instance;
@@ -42,18 +42,32 @@ fn bench(c: &mut Criterion) {
         let mut rng = test_rng();
         let (perm, f, g) = instance(mu, &mut rng);
         let (mpk, mp_idx) = prover_index::<MockPcs<Fr>>(&perm, &mut rng);
+        // "shyrax" opens sparse indicators; "dhyrax" opens the densified
+        // ones (same SRS), so biperm picks the rep, no separate PCS.
         let (hpk, hp_idx) =
             prover_index::<Hyrax<G1Projective>>(&perm, &mut rng);
+        let (dp_idx, _) = index_with::<Fr, Hyrax<G1Projective>>(
+            &hpk,
+            &perm,
+            IndicatorRepr::Dense,
+        )
+        .unwrap();
         prv.bench_with_input(BenchmarkId::new("mock", mu), &mu, |b, _| {
             b.iter(|| {
                 let mut t = Transcript::new(b"bench");
                 prove(&mpk, &mp_idx, &f, &g, &mut t).unwrap()
             })
         });
-        prv.bench_with_input(BenchmarkId::new("hyrax", mu), &mu, |b, _| {
+        prv.bench_with_input(BenchmarkId::new("shyrax", mu), &mu, |b, _| {
             b.iter(|| {
                 let mut t = Transcript::new(b"bench");
                 prove(&hpk, &hp_idx, &f, &g, &mut t).unwrap()
+            })
+        });
+        prv.bench_with_input(BenchmarkId::new("dhyrax", mu), &mu, |b, _| {
+            b.iter(|| {
+                let mut t = Transcript::new(b"bench");
+                prove(&hpk, &dp_idx, &f, &g, &mut t).unwrap()
             })
         });
     }

@@ -10,8 +10,8 @@ use ark_std::rand::RngCore;
 use ark_std::test_rng;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 
-use biperm::index;
 use biperm::permcore::{MockPcs, Permutation, PolynomialCommitment};
+use biperm::{index, index_with, IndicatorRepr};
 use hyrax::Hyrax;
 
 use common::instance;
@@ -39,12 +39,24 @@ fn bench(c: &mut Criterion) {
         let mut rng = test_rng();
         let (perm, _, _) = instance(mu, &mut rng);
         let mpk = prover_key::<MockPcs<Fr>>(&perm, &mut rng);
+        // One SRS; "shyrax" commits the indicators sparse, "dhyrax" forces
+        // the dense path via `index_with`, same Hyrax, biperm picks the rep.
         let hpk = prover_key::<Hyrax<G1Projective>>(&perm, &mut rng);
         idx.bench_with_input(BenchmarkId::new("mock", mu), &mu, |b, _| {
             b.iter(|| index::<Fr, MockPcs<Fr>>(&mpk, &perm).unwrap())
         });
-        idx.bench_with_input(BenchmarkId::new("hyrax", mu), &mu, |b, _| {
+        idx.bench_with_input(BenchmarkId::new("shyrax", mu), &mu, |b, _| {
             b.iter(|| index::<Fr, Hyrax<G1Projective>>(&hpk, &perm).unwrap())
+        });
+        idx.bench_with_input(BenchmarkId::new("dhyrax", mu), &mu, |b, _| {
+            b.iter(|| {
+                index_with::<Fr, Hyrax<G1Projective>>(
+                    &hpk,
+                    &perm,
+                    IndicatorRepr::Dense,
+                )
+                .unwrap()
+            })
         });
     }
     idx.finish();

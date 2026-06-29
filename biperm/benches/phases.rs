@@ -12,6 +12,10 @@
 //!
 //! Plain `Instant` over a few iterations, enough to read phase
 //! ratios, not a rigorous benchmark for absolute timings.
+//!
+//! Each breakdown carries a `shyrax` (sparse) and a `dhyrax` (dense) row.
+//! The `index` row densifies its reconstructed indicators directly; `prove`
+//! selects the representation via `biperm::index_with`, wrapper-free.
 
 mod common;
 
@@ -21,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ark_bn254::{Fr, G1Projective};
-use ark_poly::DenseMultilinearExtension;
+use ark_poly::{DenseMultilinearExtension, SparseMultilinearExtension};
 use ark_std::rand::RngCore;
 use ark_std::test_rng;
 use tracing::span;
@@ -30,9 +34,9 @@ use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 
 use biperm::permcore::{
-    MockPcs, Permutation, PolynomialCommitment, Transcript,
+    MleRef, MockPcs, Permutation, PolynomialCommitment, Transcript,
 };
-use biperm::{index, prove};
+use biperm::{index_with, prove, IndicatorRepr};
 use hyrax::Hyrax;
 
 use common::instance;
@@ -48,18 +52,33 @@ const PROVE_CSV_REL_PATH: &str = "/../target/prove_phases.csv";
 // `sumcheck` time one region each; `opens` aggregates the three PCS opens.
 const PROVE_PHASES: [&str; 4] = ["commit", "aux", "sumcheck", "opens"];
 
-/// Mean (aux_gen, commit) durations
-/// for `index` under PCS scheme `P`.
+/// Mean (aux_gen, commit) durations for `index` under PCS scheme `P`.
+/// With `dense`, indicators are densified before commit (the slow `O(N)`
+/// path) rather than committed sparse — this bench is the direct Hyrax
+/// caller, so it picks the representation, no wrapper needed.
 fn time_index<P: PolynomialCommitment<Fr>>(
     perm: &Permutation,
     rng: &mut impl RngCore,
+    dense: bool,
 ) -> (Duration, Duration) {
     let (pk, _vk) = P::setup(perm.num_vars() * 3 / 2, rng).unwrap();
+    // Commit both indicators, densifying first on the `dense` path.
+    let commit = |il: &SparseMultilinearExtension<Fr>,
+                  ir: &SparseMultilinearExtension<Fr>| {
+        if dense {
+            let dl = MleRef::from(il).to_dense();
+            let dr = MleRef::from(ir).to_dense();
+            black_box(P::commit(&pk, (&dl).into()).unwrap());
+            black_box(P::commit(&pk, (&dr).into()).unwrap());
+        } else {
+            black_box(P::commit(&pk, il.into()).unwrap());
+            black_box(P::commit(&pk, ir.into()).unwrap());
+        }
+    };
     // Warm up allocator / caches; result discarded.
     let il = perm.half_indicator::<Fr>(true).unwrap();
     let ir = perm.half_indicator::<Fr>(false).unwrap();
-    black_box(P::commit(&pk, (&il).into()).unwrap());
-    black_box(P::commit(&pk, (&ir).into()).unwrap());
+    commit(&il, &ir);
     let mut aux = Duration::ZERO;
     let mut com = Duration::ZERO;
     for _ in 0..ITERS {
@@ -69,8 +88,7 @@ fn time_index<P: PolynomialCommitment<Fr>>(
         aux += t.elapsed();
 
         let t = Instant::now();
-        black_box(P::commit(&pk, (&il).into()).unwrap());
-        black_box(P::commit(&pk, (&ir).into()).unwrap());
+        commit(&il, &ir);
         com += t.elapsed();
     }
     (aux / ITERS as u32, com / ITERS as u32)
@@ -120,17 +138,18 @@ where
     }
 }
 
-/// Mean per-phase durations (in `PROVE_PHASES` order) for
-/// `prove` under PCS scheme `P`, read from span timer.
+/// Mean per-phase durations (in `PROVE_PHASES` order) for `prove` under PCS
+/// scheme `P` with indicator representation `repr`, read from the span timer.
 fn time_prove<P: PolynomialCommitment<Fr>>(
     perm: &Permutation,
     f: &DenseMultilinearExtension<Fr>,
     g: &DenseMultilinearExtension<Fr>,
     rng: &mut impl RngCore,
     timings: &Timings,
+    repr: IndicatorRepr,
 ) -> [Duration; 4] {
     let pk = P::setup(perm.num_vars() * 3 / 2, rng).unwrap().0;
-    let (p_idx, _vk) = index::<Fr, P>(&pk, perm).unwrap();
+    let (p_idx, _vk) = index_with::<Fr, P>(&pk, perm, repr).unwrap();
     // Warm up, then drop its timings.
     {
         let mut t = Transcript::new(b"bench");
@@ -208,13 +227,18 @@ fn main() {
         // `instance` gives (perm, f, g); index needs only perm.
         // The f/g build is cheap setup, outside the timed region.
         let (perm, _f, _g) = instance(mu, &mut rng);
-        let (a, c) = time_index::<MockPcs<Fr>>(&perm, &mut rng);
+        let (a, c) = time_index::<MockPcs<Fr>>(&perm, &mut rng, false);
         rows.push(("mock", mu, a, c));
     }
     for mu in MUS {
         let (perm, _f, _g) = instance(mu, &mut rng);
-        let (a, c) = time_index::<Hyrax<G1Projective>>(&perm, &mut rng);
-        rows.push(("hyrax", mu, a, c));
+        let (a, c) = time_index::<Hyrax<G1Projective>>(&perm, &mut rng, true);
+        rows.push(("dhyrax", mu, a, c));
+    }
+    for mu in MUS {
+        let (perm, _f, _g) = instance(mu, &mut rng);
+        let (a, c) = time_index::<Hyrax<G1Projective>>(&perm, &mut rng, false);
+        rows.push(("shyrax", mu, a, c));
     }
     write_index_csv(&rows);
 
@@ -225,17 +249,28 @@ fn main() {
     )
     .expect("set tracing subscriber");
     let mut prove_rows: Vec<ProveRow> = Vec::new();
+    let sparse = IndicatorRepr::Sparse;
+    let dense = IndicatorRepr::Dense;
     for mu in MUS {
         let (perm, f, g) = instance(mu, &mut rng);
-        let ph = time_prove::<MockPcs<Fr>>(&perm, &f, &g, &mut rng, &timings);
+        let ph = time_prove::<MockPcs<Fr>>(
+            &perm, &f, &g, &mut rng, &timings, sparse,
+        );
         prove_rows.push(("mock", mu, ph));
     }
     for mu in MUS {
         let (perm, f, g) = instance(mu, &mut rng);
         let ph = time_prove::<Hyrax<G1Projective>>(
-            &perm, &f, &g, &mut rng, &timings,
+            &perm, &f, &g, &mut rng, &timings, dense,
         );
-        prove_rows.push(("hyrax", mu, ph));
+        prove_rows.push(("dhyrax", mu, ph));
+    }
+    for mu in MUS {
+        let (perm, f, g) = instance(mu, &mut rng);
+        let ph = time_prove::<Hyrax<G1Projective>>(
+            &perm, &f, &g, &mut rng, &timings, sparse,
+        );
+        prove_rows.push(("shyrax", mu, ph));
     }
     write_prove_csv(&prove_rows);
 }

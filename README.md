@@ -121,20 +121,26 @@ Runs full measurement loops:
 cargo bench
 ```
 
+The `index` and `prove` benches expose both a `shyrax` (sparse) and a
+`dhyrax` (dense) variant. Both use the same Hyrax backend — biperm's `index_with`
+picks the indicator representation (`IndicatorRepr`), so the dense path needs
+no separate PCS. The gap is large for `index` (the indicator commit) and
+isolated to the `opens` phase for `prove`.
+
 ### Baselines
 
 Criterion can snapshot a run and diff:
 
 ``` sh
-# Snapshot the index bench, currently dense
-cargo bench --bench index -- --save-baseline dense
+# Snapshot the index bench under a name
+cargo bench --bench index -- --save-baseline sparse
 ```
 
 After a change, compare against it:
 
 ``` sh
 # Compare current index against baseline
-cargo bench --bench index -- --baseline dense
+cargo bench --bench index -- --baseline sparse
 ```
 
 ### Phase breakdown
@@ -152,6 +158,9 @@ reconstructed externally; it's instrumented in-place with `tracing` spans (no-op
 without a subscriber) that the bench's capturing layer times. The phases are
 `commit`, `aux`, `sumcheck`, and `opens` (the three PCS opens summed via a
 shared span name).
+
+Both tables carry `shyrax` (sparse) and `dhyrax` (dense) rows, so you can see
+which phase the sparse PCS moves: the `index` `commit` and the `prove` `opens`.
 
 ``` sh
 cargo bench --bench phases
@@ -175,7 +184,7 @@ cargo bench -- --profile-time=8
 
 # Profile one id for 8s; single path example
 # target/criterion/<group>/<id>/profile/flamegraph.svg
-cargo bench --bench index -- --profile-time=8 'biperm_index/hyrax/12'
+cargo bench --bench index -- --profile-time=8 'biperm_index/shyrax/12'
 ```
 
 ## Documentation
@@ -211,7 +220,7 @@ cargo fmt --check
 - `biperm`: BiPerm implementation, library crate
 - `mulperm`: MulPerm implementation, library crate
 - `hyrax`: Hyrax PCS backend, library crate
-  - binding-only, dense; for now
+  - binding-only; dense + sparse
 
 ## Plan
 

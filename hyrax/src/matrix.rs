@@ -50,7 +50,11 @@ pub fn col_tensor<F: Field>(point: &[F], n_col: usize) -> Vec<F> {
 ///
 /// This is the dense form of the prover's central computation; the sparse
 /// backend specializes the inner loop to skip zero entries of $M$.
-pub fn lt_times_m<F: Field>(evals: &[F], l: &[F], n_col: usize) -> Vec<F> {
+pub fn lt_times_m_dense<F: Field>(
+    evals: &[F],
+    l: &[F],
+    n_col: usize,
+) -> Vec<F> {
     // n_col coordinates for cols so total
     // number of columns is 2^{n_col}
     let cols = 1usize << n_col;
@@ -60,6 +64,24 @@ pub fn lt_times_m<F: Field>(evals: &[F], l: &[F], n_col: usize) -> Vec<F> {
         for (col, w_col) in w.iter_mut().enumerate() {
             *w_col += l_row * evals[base + col];
         }
+    }
+    w
+}
+
+/// Sparse form of [`lt_times_m_dense`]: accumulate $w = L^\top M$ over the
+/// nonzero `(index, value)` entries. Index `k` splits as `row = k >> n_col`
+/// and `col = k & (2^{n_col} - 1)` (the layout above), so the result is
+/// identical to densifying `M` then [`lt_times_m_dense`], `O(nnz)` work.
+pub fn lt_times_m_sparse<F: Field>(
+    nonzeros: impl Iterator<Item = (usize, F)>,
+    l: &[F],
+    n_col: usize,
+) -> Vec<F> {
+    let cols = 1usize << n_col;
+    let mask = cols - 1;
+    let mut w = vec![F::zero(); cols];
+    for (k, v) in nonzeros {
+        w[k & mask] += l[k >> n_col] * v;
     }
     w
 }

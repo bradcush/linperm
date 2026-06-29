@@ -29,7 +29,9 @@ use ark_ff::PrimeField;
 use ark_poly::{DenseMultilinearExtension, SparseMultilinearExtension};
 use permcore::eq::eq_eval_table;
 use permcore::sumcheck::{self, SumcheckError, SumcheckProof};
-use permcore::{CoreError, Permutation, PolynomialCommitment, Transcript};
+use permcore::{
+    CoreError, MleRef, Permutation, PolynomialCommitment, Transcript,
+};
 use tracing::info_span;
 
 /// Perm proof: PCS commitments to $f, g$, the sumcheck transcript, and PCS
@@ -49,13 +51,48 @@ pub struct BiPermProof<F: PrimeField, P: PolynomialCommitment<F>> {
     pub ind_r_opening: P::Proof,
 }
 
-/// Prover half of the index for a fixed $\sigma$: the
-/// sparse indicator polynomials plus their commitments.
+/// Representation of the committed indicator polynomials, chosen at
+/// [`index_with`] time. `Sparse` is the efficient default; `Dense`
+/// forces the $O(N)$ PCS path, same commitment either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndicatorRepr {
+    Sparse,
+    Dense,
+}
+
+/// An indicator polynomial held in the representation chosen at index time.
+/// The polynomial is identical either way; only the PCS work differs.
+pub enum Indicator<F: PrimeField> {
+    Sparse(SparseMultilinearExtension<F>),
+    Dense(DenseMultilinearExtension<F>),
+}
+
+impl<F: PrimeField> Indicator<F> {
+    /// Wrap the canonical sparse indicator, densifying
+    /// when `repr` is [`IndicatorRepr::Dense`].
+    fn new(sparse: SparseMultilinearExtension<F>, repr: IndicatorRepr) -> Self {
+        match repr {
+            IndicatorRepr::Sparse => Self::Sparse(sparse),
+            IndicatorRepr::Dense => {
+                Self::Dense(MleRef::from(&sparse).to_dense())
+            }
+        }
+    }
+
+    /// Borrow as an [`MleRef`] to hand to the PCS.
+    fn mle_ref(&self) -> MleRef<'_, F> {
+        match self {
+            Self::Sparse(s) => s.into(),
+            Self::Dense(d) => d.into(),
+        }
+    }
+}
+
 /// Built once by [`index`] and reused across proofs.
 pub struct BiPermProverIndex<F: PrimeField, P: PolynomialCommitment<F>> {
     pub perm: Permutation,
-    pub ind_l: SparseMultilinearExtension<F>,
-    pub ind_r: SparseMultilinearExtension<F>,
+    pub ind_l: Indicator<F>,
+    pub ind_r: Indicator<F>,
     pub ind_l_commit: P::Commitment,
     pub ind_r_commit: P::Commitment,
 }
@@ -116,19 +153,20 @@ fn indicator_table<F: PrimeField>(
 pub type BiPermIndex<F, P> =
     (BiPermProverIndex<F, P>, BiPermVerifierIndex<F, P>);
 
-/// Preprocess a fixed $\sigma$: build and commit the two sparse indicator
+/// Preprocess a fixed $\sigma$: build and commit the two indicator
 /// polynomials $\tilde{\mathbb{1}}\_{\sigma_L}, \tilde{\mathbb{1}}\_{\sigma_R}$.
 /// Runs once per permutation, independent of any $f, g$ instance.
-pub fn index<F: PrimeField, P: PolynomialCommitment<F>>(
+pub fn index_with<F: PrimeField, P: PolynomialCommitment<F>>(
     pk: &P::ProverKey,
     perm: &Permutation,
+    repr: IndicatorRepr,
 ) -> Result<BiPermIndex<F, P>, BiPermError<P::Error>> {
-    let ind_l = perm.half_indicator::<F>(true)?;
-    let ind_r = perm.half_indicator::<F>(false)?;
+    let ind_l = Indicator::new(perm.half_indicator::<F>(true)?, repr);
+    let ind_r = Indicator::new(perm.half_indicator::<F>(false)?, repr);
     let ind_l_commit =
-        P::commit(pk, (&ind_l).into()).map_err(BiPermError::Pcs)?;
+        P::commit(pk, ind_l.mle_ref()).map_err(BiPermError::Pcs)?;
     let ind_r_commit =
-        P::commit(pk, (&ind_r).into()).map_err(BiPermError::Pcs)?;
+        P::commit(pk, ind_r.mle_ref()).map_err(BiPermError::Pcs)?;
     Ok((
         BiPermProverIndex {
             perm: perm.clone(),
@@ -143,6 +181,15 @@ pub fn index<F: PrimeField, P: PolynomialCommitment<F>>(
             ind_r_commit,
         },
     ))
+}
+
+/// Preprocess a fixed $\sigma$ with the default sparse
+/// indicator representation; see [`index_with`].
+pub fn index<F: PrimeField, P: PolynomialCommitment<F>>(
+    pk: &P::ProverKey,
+    perm: &Permutation,
+) -> Result<BiPermIndex<F, P>, BiPermError<P::Error>> {
+    index_with(pk, perm, IndicatorRepr::Sparse)
 }
 
 /// Prove $f(\sigma(x)) = g(x)$ for all $x \in B_\mu$.
@@ -199,10 +246,10 @@ pub fn prove<F: PrimeField, P: PolynomialCommitment<F>>(
     let point_r: Vec<F> = r.iter().chain(alpha_r).copied().collect();
     let opens_span = info_span!("opens").entered();
     let (ind_l_at_r, ind_l_opening) =
-        P::open(pk, (&index.ind_l).into(), &point_l, transcript)
+        P::open(pk, index.ind_l.mle_ref(), &point_l, transcript)
             .map_err(BiPermError::Pcs)?;
     let (ind_r_at_r, ind_r_opening) =
-        P::open(pk, (&index.ind_r).into(), &point_r, transcript)
+        P::open(pk, index.ind_r.mle_ref(), &point_r, transcript)
             .map_err(BiPermError::Pcs)?;
     drop(opens_span);
     Ok(BiPermProof {

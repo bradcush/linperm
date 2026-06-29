@@ -11,9 +11,10 @@
 //! This is the **binding-only, naive** variant: no blinding (so not hiding /
 //! zero-knowledge) and no inner-product compression (so the proof is the
 //! $O(\sqrt{N})$ vector $w$ rather than $O(\log N)$). The transcript is
-//! therefore unused, there are no squeezed challenges yet; Commitment and
-//! verifier costs are already $O(\sqrt{N})$; only the prover's commit/open
-//! time is $O(N)$ pending the sparse backend.
+//! therefore unused, there are no squeezed challenges yet. Commitment and
+//! verifier costs are already $O(\sqrt{N})$; the prover commits/opens in
+//! $O(N)$ on a dense poly or $O(\mathrm{nnz})$ on an `MleRef::Sparse`, with
+//! identical commitments either way.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -21,6 +22,7 @@ extern crate alloc;
 
 pub mod matrix;
 
+use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
@@ -30,7 +32,10 @@ use ark_std::rand::RngCore;
 use permcore::pcs::MleRef;
 use permcore::{PolynomialCommitment, Transcript};
 
-use matrix::{col_tensor, dot, lt_times_m, row_tensor, split_vars};
+use matrix::{
+    col_tensor, dot, lt_times_m_dense, lt_times_m_sparse, row_tensor,
+    split_vars,
+};
 
 /// Public parameters: the column generators (with unknown pairwise discrete
 /// logs) and the variable bound they were sized for. `HyraxKey` equals Hyrax's
@@ -87,8 +92,10 @@ impl<G: CurveGroup> PolynomialCommitment<G::ScalarField> for Hyrax<G> {
         Ok((key.clone(), key))
     }
 
-    /// Commit to the rows of the `M` matrix using dense
-    /// evaluations, single MSM for each row is used.
+    /// Commit to the rows of the matrix $M$: one Pedersen MSM per row.
+    /// A dense poly MSMs each full row; a sparse poly MSMs only each row's
+    /// nonzero `(generator, scalar)` pairs (empty rows free), yielding
+    /// an identical commitment, see [`commit_sparse_rows`].
     fn commit(
         pk: &Self::ProverKey,
         poly: MleRef<'_, G::ScalarField>,
@@ -100,21 +107,25 @@ impl<G: CurveGroup> PolynomialCommitment<G::ScalarField> for Hyrax<G> {
                 max_num_vars: pk.max_num_vars,
             });
         }
-        let dense = poly.to_dense();
         let (n_row, n_col) = split_vars(num_vars);
         let cols = 1usize << n_col;
+        let rows = 1usize << n_row;
         let bases = &pk.generators[..cols];
-        // One Pedersen MSM per row. The sparse backend will pass only a row's
-        // nonzero (generator, scalar) pairs here instead of the full slice.
-        // That will allow us to get an optimized prover when sparse.
-        let commitment = (0..(1usize << n_row))
-            .map(|row| {
-                let base = row * cols;
-                let scalars = &dense.evaluations[base..base + cols];
-                G::msm_unchecked(bases, scalars).into_affine()
-            })
-            .collect();
-
+        let commitment = match poly {
+            MleRef::Dense(dense) => (0..rows)
+                .map(|row| {
+                    let base = row * cols;
+                    let scalars = &dense.evaluations[base..base + cols];
+                    G::msm_unchecked(bases, scalars).into_affine()
+                })
+                .collect(),
+            MleRef::Sparse(sparse) => commit_sparse_rows::<G>(
+                sparse.evaluations.iter().map(|(&k, &v)| (k, v)),
+                bases,
+                rows,
+                n_col,
+            ),
+        };
         Ok(commitment)
     }
 
@@ -139,13 +150,21 @@ impl<G: CurveGroup> PolynomialCommitment<G::ScalarField> for Hyrax<G> {
                 got: point.len(),
             });
         }
-        let dense = poly.to_dense();
         let (_, n_col) = split_vars(num_vars);
-        // We're not returning l yet
         let l = row_tensor(point, n_col);
         let r = col_tensor(point, n_col);
-        // `dense.evaluations` is M in a vector form
-        let w = lt_times_m(&dense.evaluations, &l, n_col);
+        // `w = L^T M`; sparse accumulates over only M's nonzeros (same
+        // result). We're not returnning l yet, right now it's just w.
+        let w = match poly {
+            MleRef::Dense(dense) => {
+                lt_times_m_dense(&dense.evaluations, &l, n_col)
+            }
+            MleRef::Sparse(sparse) => lt_times_m_sparse(
+                sparse.evaluations.iter().map(|(&k, &v)| (k, v)),
+                &l,
+                n_col,
+            ),
+        };
         let value = dot(&w, &r);
         Ok((value, w))
     }
@@ -181,12 +200,38 @@ impl<G: CurveGroup> PolynomialCommitment<G::ScalarField> for Hyrax<G> {
     }
 }
 
+/// Commit a sparse poly's rows: one Pedersen MSM per row over only that row's
+/// nonzero `(generator, scalar)` pairs, drawn from `(index, value)` stream.
+/// Empty rows MSM to the identity, so the commitment is byte-identical to the
+/// dense path, `O(nnz)` group ops instead of `O(2^{num_vars})`.
+fn commit_sparse_rows<G: CurveGroup>(
+    nonzeros: impl Iterator<Item = (usize, G::ScalarField)>,
+    bases: &[G::Affine],
+    rows: usize,
+    n_col: usize,
+) -> Vec<G::Affine> {
+    let mask = (1usize << n_col) - 1;
+    let mut row_bases: Vec<Vec<G::Affine>> = vec![Vec::new(); rows];
+    let mut row_scalars: Vec<Vec<G::ScalarField>> = vec![Vec::new(); rows];
+    for (k, v) in nonzeros {
+        row_bases[k >> n_col].push(bases[k & mask]);
+        row_scalars[k >> n_col].push(v);
+    }
+    row_bases
+        .iter()
+        .zip(&row_scalars)
+        .map(|(b, s)| G::msm_unchecked(b, s).into_affine())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ark_bn254::{Fr, G1Projective};
     use ark_ff::UniformRand;
-    use ark_poly::{DenseMultilinearExtension, Polynomial};
+    use ark_poly::{
+        DenseMultilinearExtension, Polynomial, SparseMultilinearExtension,
+    };
     use ark_std::test_rng;
 
     type H = Hyrax<G1Projective>;
@@ -308,6 +353,44 @@ mod tests {
         let c_a = H::commit(&pk, (&a).into()).unwrap();
         let c_b = H::commit(&pk, (&b).into()).unwrap();
         assert_ne!(c_a, c_b);
+    }
+
+    #[test]
+    // Binding is over the polynomial, not its representation: committing and
+    // opening a sparse poly must match densifying it first, bit for bit.
+    fn sparse_matches_dense() {
+        let mut rng = test_rng();
+        for num_vars in 1..=6 {
+            let size = 1usize << num_vars;
+            // Few nonzeros so some matrix rows are entirely empty.
+            let nnz = (size / 4).max(1);
+            let sparse = SparseMultilinearExtension::<Fr>::rand_with_config(
+                num_vars, nnz, &mut rng,
+            );
+            let dense = MleRef::from(&sparse).to_dense();
+            let (pk, vk) = H::setup(num_vars, &mut rng).unwrap();
+            let c_sparse = H::commit(&pk, (&sparse).into()).unwrap();
+            let c_dense = H::commit(&pk, (&dense).into()).unwrap();
+            assert_eq!(c_sparse, c_dense, "commit, num_vars = {num_vars}");
+
+            let point: Vec<Fr> =
+                (0..num_vars).map(|_| Fr::rand(&mut rng)).collect();
+            let mut t_s = Transcript::new(b"diff");
+            let mut t_d = Transcript::new(b"diff");
+            let (v_s, w_s) =
+                H::open(&pk, (&sparse).into(), &point, &mut t_s).unwrap();
+            let (v_d, w_d) =
+                H::open(&pk, (&dense).into(), &point, &mut t_d).unwrap();
+            assert_eq!(v_s, v_d, "value, num_vars = {num_vars}");
+            assert_eq!(w_s, w_d, "proof, num_vars = {num_vars}");
+
+            // The sparse-built proof must still verify.
+            let mut t_v = Transcript::new(b"diff");
+            assert!(
+                H::verify(&vk, &c_sparse, &point, v_s, &w_s, &mut t_v).unwrap(),
+                "verify, num_vars = {num_vars}"
+            );
+        }
     }
 
     #[test]
