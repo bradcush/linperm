@@ -1,14 +1,16 @@
-//! Sumcheck protocol for products of multilinear polynomials.
+//! Sumcheck protocol for sums of products of multilinear polynomials.
 //!
-//! Reduces the claim $T = \sum_{x \in B_\mu} \prod_k g_k(x)$ to a single
-//! evaluation claim $\prod_k g_k(r) = u$ at a random $r \in F^\mu$. The
-//! verifier then needs to evaluate the final claim by some external means,
-//! typically PCS openings of the underlying polynomials at $r$, or direct
-//! computation when the verifier can.
+//! Reduces the claim $T = \sum_{x \in B_\mu} \sum_i c_i \prod_k g_{i,k}(x)$
+//! to a single evaluation claim $\sum_i c_i \prod_k g_{i,k}(r) = u$ at a
+//! random $r \in F^\mu$. The verifier then needs to evaluate the final claim
+//! by some external means, typically PCS openings of the underlying
+//! polynomials at $r$, or direct computation when the verifier can.
 //!
-//! Each factor $g_k$ must be multilinear; the protocol degree is the number
-//! of factors $d$. Each round produces a univariate polynomial of degree $d$,
-//! encoded as $d+1$ evaluations at $\{0, 1, \ldots, d\}$.
+//! Each factor $g_{i,k}$ must be multilinear; the protocol degree is the
+//! maximum number of factors in any term. Each round produces a univariate
+//! polynomial of degree $d$, encoded as $d+1$ evaluations at
+//! $\{0, 1, \ldots, d\}$. [`prove`] covers the single-product case
+//! $T = \sum_x \prod_k g_k(x)$; [`prove_terms`] the general form.
 
 use alloc::vec::Vec;
 
@@ -56,8 +58,9 @@ pub struct SumcheckProverOutput<F> {
 /// Output of a successful sumcheck verify call.
 ///
 /// `challenges` is the random point $r = (r_1, \ldots, r_\mu)$.
-/// `final_claim` is the value $\prod_k g_k(r)$ must equal. The caller
-/// is responsible for checking this by external means (eg. PCS opening).
+/// `final_claim` is the value the proved expression must
+/// equal at $r$. ($\prod_k g_k(r)$ for [`prove`],
+/// $\sum_i c_i \prod_k g_{i,k}(r)$ for [`prove_terms`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SumcheckOutput<F> {
     // Each challenge, or single random point
@@ -65,9 +68,24 @@ pub struct SumcheckOutput<F> {
     pub final_claim: F,
 }
 
+/// One product term $c \cdot \prod_k g_{i_k}$ of a sum of products,
+/// referencing its factors by index into a shared factor slice so a
+/// polynomial appearing in several terms is stored (and folded) once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Term<F> {
+    /// Coefficient $c$ scaling the product.
+    pub coeff: F,
+    /// Indices into the shared factor slice; may repeat
+    /// (e.g. squaring a factor) and may appear in other terms.
+    pub factors: Vec<usize>,
+}
+
 /// Prove $T = \sum_{x \in B_\mu} \prod_k g_k(x)$ where each $g_k$ is
 /// multilinear. Returns the proof transcript; the initial claim $T$ is
 /// implicit and must be supplied to the verifier out-of-band.
+///
+/// Single-term case of [`prove_terms`]; produces an identical transcript
+/// for the product of all `factors` with coefficient one.
 ///
 /// # Panics
 ///
@@ -77,9 +95,36 @@ pub fn prove<F: PrimeField>(
     factors: &[DenseMultilinearExtension<F>],
     transcript: &mut Transcript,
 ) -> SumcheckProverOutput<F> {
+    let term = Term {
+        coeff: F::one(),
+        factors: (0..factors.len()).collect(),
+    };
+    prove_terms(factors, &[term], transcript)
+}
+
+/// Prove $T = \sum_{x \in B_\mu} \sum_i c_i \prod_k g_{i,k}(x)$ where each
+/// factor $g_{i,k}$ is multilinear and each [`Term`] indexes into `factors`.
+/// The protocol degree is the maximum factor count over `terms`; the verifier
+/// must be given the same value. Returns the proof transcript; the initial
+/// claim $T$ is implicit and must be supplied to the verifier out-of-band.
+///
+/// # Panics
+///
+/// Panics if `factors` or `terms` is empty, factors have
+/// inconsistent `num_vars`, a term references a factor out
+/// of range, or every term is empty (degree zero).
+pub fn prove_terms<F: PrimeField>(
+    factors: &[DenseMultilinearExtension<F>],
+    terms: &[Term<F>],
+    transcript: &mut Transcript,
+) -> SumcheckProverOutput<F> {
     assert!(
         !factors.is_empty(),
-        "sumcheck::prove: factors must not be empty",
+        "sumcheck::prove_terms: factors must not be empty",
+    );
+    assert!(
+        !terms.is_empty(),
+        "sumcheck::prove_terms: terms must not be empty",
     );
     // Factors `num_vars` must all be the same.
     // In the case of BiPerm, we have `num_vars = \mu`.
@@ -88,12 +133,26 @@ pub fn prove<F: PrimeField>(
     for f in factors.iter().skip(1) {
         assert_eq!(
             f.num_vars, num_vars,
-            "sumcheck::prove: inconsistent num_vars",
+            "sumcheck::prove_terms: inconsistent num_vars",
         );
     }
-    let degree = factors.len();
-    // Working copies of each factor's eval
-    // table; updated in place per round.
+    // Check index range
+    for t in terms {
+        for &i in &t.factors {
+            assert!(
+                i < factors.len(),
+                "sumcheck::prove_terms: factor index out of range",
+            );
+        }
+    }
+    // Degree is just the max # of MLEs in a term
+    let degree = terms.iter().map(|t| t.factors.len()).max().unwrap();
+    assert!(
+        degree >= 1,
+        "sumcheck::prove_terms: degree must be at least 1"
+    );
+    // Working copies of each factor's eval table; updated in place per
+    // round. Shared across terms, so each factor folds once per round.
     let mut tables: Vec<Vec<F>> =
         factors.iter().map(|f| f.evaluations.clone()).collect();
     let mut round_polys = Vec::with_capacity(num_vars);
@@ -109,15 +168,17 @@ pub fn prove<F: PrimeField>(
             let one_minus_c = F::one() - c;
             let mut sum = F::zero();
             for y in 0..half {
-                let mut prod = F::one();
                 // Reusing tables is an optimization, we get all the
                 // values over the entire cube to start from initially
-                for table in tables.iter() {
-                    let even = table[2 * y];
-                    let odd = table[2 * y + 1];
-                    prod *= one_minus_c * even + c * odd;
+                for term in terms {
+                    let mut prod = term.coeff;
+                    for &i in &term.factors {
+                        let even = tables[i][2 * y];
+                        let odd = tables[i][2 * y + 1];
+                        prod *= one_minus_c * even + c * odd;
+                    }
+                    sum += prod;
                 }
-                sum += prod;
             }
             // Because single eval is a sum over $B_\mu$, but
             // $|evals| = degree + 1$ for the round univariate poly
@@ -153,8 +214,10 @@ pub fn prove<F: PrimeField>(
 /// Verify a sumcheck proof against `initial_claim`.
 ///
 /// Checks per-round consistency $s_i(0) + s_i(1) == prev_claim$ and the
-/// proof's structural shape. Returns the challenge point and the final claim
-/// the caller must check $\prod_k g_k(r) == final_claim$ against. The caller
+/// proof's structural shape; `degree` is the number of factors for [`prove`]
+/// or the maximum term factor count for [`prove_terms`]. Returns the
+/// challenge point and the final claim the caller must check
+/// $\sum_i c_i \prod_k g_{i,k}(r) == final_claim$ against. The caller
 /// evaluates claimed poly the challenge point to check the `final_claim`.
 pub fn verify<F: PrimeField>(
     initial_claim: F,
@@ -275,6 +338,86 @@ mod tests {
             .map(|f| f.evaluate(&out.challenges))
             .product();
         assert_eq!(final_product, out.final_claim);
+    }
+
+    /// Sum over $B_\mu$ of the term form,
+    /// what `prove_terms` is checking
+    fn terms_claim(
+        factors: &[DenseMultilinearExtension<Fr>],
+        terms: &[Term<Fr>],
+    ) -> Fr {
+        let n = 1 << factors[0].num_vars;
+        (0..n)
+            .map(|x| {
+                terms
+                    .iter()
+                    .map(|t| {
+                        t.factors
+                            .iter()
+                            .map(|&i| factors[i].evaluations[x])
+                            .product::<Fr>()
+                            * t.coeff
+                    })
+                    .sum::<Fr>()
+            })
+            .sum()
+    }
+
+    #[test]
+    // Mixed-degree terms sharing factors: c0*g0*g1*g2 + c1*g1
+    fn multi_term_round_trip() {
+        let mut rng = test_rng();
+        let num_vars = 4;
+        let factors: Vec<_> =
+            (0..3).map(|_| random_mle(num_vars, &mut rng)).collect();
+        let terms = vec![
+            Term {
+                coeff: Fr::rand(&mut rng),
+                factors: vec![0, 1, 2],
+            },
+            Term {
+                coeff: Fr::rand(&mut rng),
+                factors: vec![1],
+            },
+        ];
+        let claim = terms_claim(&factors, &terms);
+        let mut p_t = Transcript::new(b"sumcheck");
+        let proof = prove_terms(&factors, &terms, &mut p_t).proof;
+        let mut v_t = Transcript::new(b"sumcheck");
+        // Degree 3 (max), # of factors in the first term
+        let out = verify(claim, num_vars, 3, &proof, &mut v_t).unwrap();
+        // Evaluation at the random point
+        let expected: Fr = terms
+            .iter()
+            .map(|t| {
+                t.factors
+                    .iter()
+                    .map(|&i| factors[i].evaluate(&out.challenges))
+                    .product::<Fr>()
+                    * t.coeff
+            })
+            .sum();
+        assert_eq!(expected, out.final_claim);
+    }
+
+    #[test]
+    // A repeated index within a term squares the factor
+    fn repeated_factor_round_trip() {
+        let mut rng = test_rng();
+        let num_vars = 3;
+        let factor = random_mle(num_vars, &mut rng);
+        let terms = vec![Term {
+            coeff: Fr::from(1u64),
+            factors: vec![0, 0],
+        }];
+        let factors = vec![factor];
+        let claim = terms_claim(&factors, &terms);
+        let mut p_t = Transcript::new(b"sumcheck");
+        let proof = prove_terms(&factors, &terms, &mut p_t).proof;
+        let mut v_t = Transcript::new(b"sumcheck");
+        let out = verify(claim, num_vars, 2, &proof, &mut v_t).unwrap();
+        let eval = factors[0].evaluate(&out.challenges);
+        assert_eq!(eval * eval, out.final_claim);
     }
 
     #[test]

@@ -92,10 +92,10 @@ impl<G: CurveGroup> PolynomialCommitment<G::ScalarField> for Hyrax<G> {
         Ok((key.clone(), key))
     }
 
-    /// Commit to the rows of the matrix $M$: one Pedersen MSM per row.
-    /// A dense poly MSMs each full row; a sparse poly MSMs only each row's
-    /// nonzero `(generator, scalar)` pairs (empty rows free), yielding
-    /// an identical commitment, see [`commit_sparse_rows`].
+    /// Commit to the rows of the matrix $M$: one Pedersen MSM
+    /// per row. A dense poly MSMs each full row; a sparse poly
+    /// MSMs only each row's nonzero `(generator, scalar)` pairs
+    /// (empty rows free), yielding an identical commitment.
     fn commit(
         pk: &Self::ProverKey,
         poly: MleRef<'_, G::ScalarField>,
