@@ -2,10 +2,10 @@
 
 ## Background
 
-A recent paper by Benedikt Bünz, Jessica Chen, and Zachary DeStefano proposing
-two new permutation arguments for use in modern SNARK protocols. This
-repository aims to implement `BiPerm` and `MulPerm` efficiently in Rust. It's a
-work in progress which has not gone through a formal audit and is not
+A recent paper by Benedikt Bünz, Jessica Chen, Zachary DeStefano, and Binyi
+Chen proposing two new permutation arguments for use in modern SNARK protocols.
+This repository aims to implement `BiPerm` and `MulPerm` efficiently in Rust.
+It's a work in progress which has not gone through a formal audit and is not
 recommended for use in production systems. Use at your own risk.
 
 ## Paper
@@ -122,7 +122,7 @@ cargo bench
 ```
 
 The `index` and `prove` benches expose both a `shyrax` (sparse) and a
-`dhyrax` (dense) variant. Both use the same Hyrax backend — biperm's `index_with`
+`dhyrax` (dense) variant. Both use the same Hyrax backend --- biperm's `index_with`
 picks the indicator representation (`IndicatorRepr`), so the dense path needs
 no separate PCS. The gap is large for `index` (the indicator commit) and
 isolated to the `opens` phase for `prove`.
