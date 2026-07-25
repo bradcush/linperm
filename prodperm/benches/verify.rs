@@ -8,11 +8,13 @@ use ark_std::rand::RngCore;
 use ark_std::test_rng;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 
-use biperm::permcore::{
+use hyrax::Hyrax;
+use prodperm::permcore::{
     MockPcs, Permutation, PolynomialCommitment, Transcript,
 };
-use biperm::{index, prove, verify, BiPermProof, BiPermVerifierIndex};
-use hyrax::Hyrax;
+use prodperm::{
+    index, prove, verify, Opening, ProdPermProof, ProdPermVerifierIndex,
+};
 
 use common::instance;
 
@@ -24,44 +26,48 @@ fn prep<P: PolynomialCommitment<Fr>>(
     rng: &mut impl RngCore,
 ) -> (
     P::VerifierKey,
-    BiPermVerifierIndex<Fr, P>,
-    BiPermProof<Fr, P>,
+    ProdPermVerifierIndex<Fr, P>,
+    ProdPermProof<Fr, P>,
 ) {
-    let (pk, vk) = P::setup(perm.num_vars() * 3 / 2, rng).unwrap();
+    let (pk, vk) = P::setup(perm.num_vars() + 1, rng).unwrap();
     let (p_idx, v_idx) = index::<Fr, P>(&pk, perm).unwrap();
     let mut t = Transcript::new(b"bench");
     let proof = prove(&pk, &p_idx, f, g, &mut t).unwrap();
     (vk, v_idx, proof)
 }
 
-/// Bytes the verifier holds/receives: index commitments +
-/// the proof. So we can check/vefify sizes are consistent.
+/// An opening costs its claimed value and proof.
+fn opening<P: PolynomialCommitment<Fr>>(open: &Opening<Fr, P>) -> usize {
+    open.value.compressed_size() + open.proof.compressed_size()
+}
+
+/// Bytes the verifier holds/receives: index commitment +
+/// the proof. So we can check/verify sizes are consistent.
 fn footprint<P: PolynomialCommitment<Fr>>(
-    vidx: &BiPermVerifierIndex<Fr, P>,
-    proof: &BiPermProof<Fr, P>,
+    vidx: &ProdPermVerifierIndex<Fr, P>,
+    proof: &ProdPermProof<Fr, P>,
 ) -> usize {
     // Concat, compressed, for verifier
-    vidx.ind_l_commit.compressed_size()
-        + vidx.ind_r_commit.compressed_size()
+    vidx.sigma_commit.compressed_size()
         + proof.f_commit.compressed_size()
         + proof.g_commit.compressed_size()
+        + proof.v_commit.compressed_size()
         + proof.sumcheck.round_polys.compressed_size()
-        + proof.g_at_alpha.compressed_size()
-        + proof.g_opening.compressed_size()
-        + proof.f_at_r.compressed_size()
-        + proof.f_opening.compressed_size()
-        + proof.ind_l_at_r.compressed_size()
-        + proof.ind_l_opening.compressed_size()
-        + proof.ind_r_at_r.compressed_size()
-        + proof.ind_r_opening.compressed_size()
+        + opening(&proof.f)
+        + opening(&proof.g)
+        + opening(&proof.sigma)
+        + opening(&proof.v_bot)
+        + opening(&proof.v_top)
+        + opening(&proof.v_left)
+        + opening(&proof.v_right)
+        + opening(&proof.v_root)
 }
 
 fn bench(c: &mut Criterion) {
-    // BiPerm needs even $\mu$. 8,10 below
-    // the verify crossover; 12,14 above.
+    // Same $\mu$ values as the BiPerm benches.
     const MUS: [usize; 4] = [8, 10, 12, 14];
 
-    let mut group = c.benchmark_group("biperm_verify");
+    let mut group = c.benchmark_group("prodperm_verify");
     let mut sizes = Vec::new();
 
     for mu in MUS {
@@ -91,9 +97,8 @@ fn bench(c: &mut Criterion) {
     }
     group.finish();
 
-    // Size table (deterministic, printed once, not part of the timing).
-    // Here for reference but really doesn't matter in benches. We could
-    // choose to iterate bytes if we want to make more of a timed bench.
+    // Size table (deterministic, printed once, not part of the
+    // timing). Directly comparable to BiPerm table at equal $\mu$.
     println!("\nverifier footprint (bytes)");
     println!("{:>4}  {:>12}  {:>12}", "mu", "mock", "hyrax");
     for (mu, m, h) in sizes {

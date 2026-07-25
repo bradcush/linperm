@@ -37,11 +37,14 @@ pub enum SumcheckError {
     RoundCheckFailed { round: usize },
 }
 
-/// Transcript of a sumcheck proof.
+/// The prover's per-round messages, one per variable.
 ///
 /// `round_polys[i]` is the round-$i$ univariate polynomial sent
 /// by the prover, encoded as evaluations at `0, 1, ..., degree`.
 /// Obviously with $d+1$ points, can use Lagrange build it.
+///
+/// This is the prover's half of the interaction. The verifier's half (the
+/// per-round challenges) isn't stored since Fiat-Shamir makes it recoverable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SumcheckProof<F> {
     pub round_polys: Vec<Vec<F>>,
@@ -81,10 +84,10 @@ pub struct Term<F> {
 }
 
 /// Prove $T = \sum_{x \in B_\mu} \prod_k g_k(x)$ where each $g_k$ is
-/// multilinear. Returns the proof transcript; the initial claim $T$ is
-/// implicit and must be supplied to the verifier out-of-band.
+/// multilinear. Returns the prover's per-round messages; the initial claim
+/// $T$ is implicit and must be supplied to the verifier out-of-band.
 ///
-/// Single-term case of [`prove_terms`]; produces an identical transcript
+/// Single-term case of [`prove_terms`]; produces identical messages
 /// for the product of all `factors` with coefficient one.
 ///
 /// # Panics
@@ -102,11 +105,12 @@ pub fn prove<F: PrimeField>(
     prove_terms(factors, &[term], transcript)
 }
 
-/// Prove $T = \sum_{x \in B_\mu} \sum_i c_i \prod_k g_{i,k}(x)$ where each
-/// factor $g_{i,k}$ is multilinear and each [`Term`] indexes into `factors`.
-/// The protocol degree is the maximum factor count over `terms`; the verifier
-/// must be given the same value. Returns the proof transcript; the initial
-/// claim $T$ is implicit and must be supplied to the verifier out-of-band.
+/// Prove $T = \sum_{x \in B_\mu} \sum_i c_i \prod_k g_{i,k}(x)$ where
+/// each factor $g_{i,k}$ is multilinear and each [`Term`] indexes into
+/// `factors`. The protocol degree is the maximum factor count over
+/// `terms`; the verifier must be given the same value. Returns
+/// the prover's per-round messages; the initial claim $T$ is
+/// implicit and must be supplied to the verifier out-of-band.
 ///
 /// # Panics
 ///

@@ -100,6 +100,13 @@ impl Permutation {
             .collect()
     }
 
+    /// Build the dense evaluation table for $\tilde{s}\_\sigma$ over $B_\mu$.
+    /// The image $\sigma(x)$ of each point as a field element. The image is a
+    /// *value* paired with $f(x)$, not an index into an indicator table.
+    pub fn image_evaluations<F: ark_ff::Field>(&self) -> Vec<F> {
+        self.image.iter().map(|&y| F::from(y as u64)).collect()
+    }
+
     /// ($\sigma_L(x)$, $\sigma_R(x)$), the first $\mu/2$ and
     /// last $\mu/2$ bits of $\sigma(x)$, used by BiPerm.
     ///
@@ -217,6 +224,18 @@ mod tests {
                 }
             }
             assert_eq!(reconstructed, perm.apply(x));
+        }
+    }
+
+    #[test]
+    fn image_evaluations_match_apply() {
+        use ark_bn254::Fr;
+        let perm =
+            Permutation::new(alloc::vec![5, 3, 7, 1, 0, 6, 2, 4]).unwrap();
+        let table = perm.image_evaluations::<Fr>();
+        assert_eq!(table.len(), perm.size());
+        for (x, &value) in table.iter().enumerate() {
+            assert_eq!(value, Fr::from(perm.apply(x) as u64));
         }
     }
 

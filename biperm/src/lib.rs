@@ -1,8 +1,8 @@
 //! BiPerm linear-time permutation argument.
 //!
-//! Proves $f(\sigma(x)) = g(x)$ for all $x \in B_\mu$, where $\sigma$ is a
-//! permutation on the boolean hypercube and $f, g$ are multilinear. The
-//! reduction is via Lemma 4 of the paper:
+//! Proves $g(\sigma(x)) = f(x)$ for all $x \in B_\mu$ (equivalently
+//! $g = f \circ \sigma^{-1}$), where $\sigma$ is a permutation on the boolean
+//! hypercube and $f, g$ are multilinear. The reduction is via Lemma 4:
 //!
 //! $$\sum_{x \in B_\mu} f(x) \cdot \tilde{\mathbb{1}}\_\sigma(x, \alpha) = g(\alpha)$$
 //!
@@ -34,7 +34,7 @@ use permcore::{
 };
 use tracing::info_span;
 
-/// Perm proof: PCS commitments to $f, g$, the sumcheck transcript, and PCS
+/// Perm proof: PCS commitments to $f, g$, the sumcheck messages, and PCS
 /// openings of $g$ at $\alpha$, $f$ at the sumcheck challenge $r$, and the
 /// two indicator polynomials at $(r \Vert \alpha_L)$ / $(r \Vert \alpha_R)$.
 pub struct BiPermProof<F: PrimeField, P: PolynomialCommitment<F>> {
@@ -192,7 +192,7 @@ pub fn index<F: PrimeField, P: PolynomialCommitment<F>>(
     index_with(pk, perm, IndicatorRepr::Sparse)
 }
 
-/// Prove $f(\sigma(x)) = g(x)$ for all $x \in B_\mu$.
+/// Prove $g(\sigma(x)) = f(x)$ for all $x \in B_\mu$.
 ///
 /// Commits to $f, g$ via the PCS, absorbs the index and instance
 /// commitments into the transcript, then squeezes $\alpha$ so $\alpha$
@@ -358,7 +358,7 @@ mod tests {
     use permcore::MockPcs;
 
     /// Create the MLE of polynomials $f, g$ s.t.
-    /// $f(\sigma(x)) = g(x)$ for all $x \in B_\mu$.
+    /// $g(\sigma(x)) = f(x)$ for all $x \in B_\mu$.
     fn consistent_pair(
         perm: &Permutation,
         rng: &mut impl ark_std::rand::RngCore,

@@ -1,22 +1,32 @@
 #!/usr/bin/env bash
 #
-# Render the index phase-breakdown table from target/index_phases.csv,
-# the raw numbers written by `cargo bench --bench phases`.
+# Render one protocol's index phase-breakdown table, the raw
+# numbers written by `cargo bench -p <protocol> --bench phases`.
 # Percentages are derived here from the raw ms.
 #
-# Usage: scripts/index-phases-table.sh [path-to-csv]
+# Usage: scripts/index-phases-table.sh [biperm|prodperm]
 set -euo pipefail
 
-csv="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/target/index_phases.csv}"
+proto="${1:-biperm}"
+case "$proto" in
+biperm | prodperm) ;;
+*)
+  echo "usage: $(basename "$0") [biperm|prodperm]" >&2
+  exit 2
+  ;;
+esac
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+csv="$root/target/${proto}_index_phases.csv"
 
 if [[ ! -f $csv ]]; then
-  echo "no CSV at $csv; run: cargo bench --bench phases" >&2
+  echo "no CSV at $csv; run: cargo bench -p $proto --bench phases" >&2
   exit 1
 fi
 
-awk -F, '
+awk -F, -v proto="$proto" '
 BEGIN {
-    print "biperm_index phase breakdown\n"
+    print proto "_index phase breakdown\n"
     printf "%-6s %3s   %13s   %13s   %11s\n", \
         "scheme", "mu", "aux_gen", "commit", "total"
 }

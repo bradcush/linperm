@@ -1,5 +1,5 @@
 [workspace]
-members = ["permcore", "biperm", "mulperm", "hyrax"]
+members = ["permcore", "biperm", "mulperm", "prodperm", "hyrax"]
 resolver = "2"
 
 [workspace.package]
@@ -31,6 +31,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
 permcore = { path = "permcore" }
 biperm = { path = "biperm" }
 mulperm = { path = "mulperm" }
+prodperm = { path = "prodperm" }
 hyrax = { path = "hyrax" }
 
 # Symbolized frames for bench flamegraphs (pprof under `--profile-time`).
