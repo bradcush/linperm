@@ -121,6 +121,12 @@ Runs full measurement loops:
 cargo bench
 ```
 
+### Benchmark Index report
+
+``` sh
+xdg-open target/criterion/report/index.html
+```
+
 The `index` and `prove` benches expose both a `shyrax` (sparse) and a
 `dhyrax` (dense) variant. Both use the same Hyrax backend --- biperm's `index_with`
 picks the indicator representation (`IndicatorRepr`), so the dense path needs
@@ -141,6 +147,13 @@ After a change, compare against it:
 ``` sh
 # Compare current index against baseline
 cargo bench --bench index -- --baseline sparse
+```
+
+Or run a specific argument:
+
+``` sh
+# index, prove, verify
+cargo bench -p biperm  --bench verify
 ```
 
 ### Phase breakdown
@@ -166,8 +179,32 @@ which phase the sparse PCS moves: the `index` `commit` and the `prove` `opens`.
 cargo bench --bench phases
 
 # Render as tables
-scripts/index-phases-table.sh
-scripts/prove-phases-table.sh
+scripts/index-phases-table.sh # biperm
+scripts/prove-phases-table.sh prodperm
+```
+
+### Protocol comparison
+
+BiPerm against the `prodperm` grand-product baseline, per phase and per $\mu$.
+Reads the CSVs already on disk; `--run` regenerates both back-to-back first,
+which is the only way to guarantee both protocols saw the same machine state.
+
+`real` (default) compares `shyrax` against `hyrax`, the rows where both use
+the sparse-friendly Hyrax path; `mock` compares the PIOP cost with no curve
+operations. BiPerm's `dhyrax` has no ProdPerm counterpart because the
+arithmetization doesn't matter re: sparsity.
+
+One per call, mirroring the table scripts:
+
+``` sh
+scripts/index-phases-compare.sh
+scripts/prove-phases-compare.sh
+
+# PIOP cost only, no curve operations w/ mock
+scripts/prove-phases-compare.sh mock
+
+# Regenerate both breakdowns first
+scripts/prove-phases-compare.sh --run
 ```
 
 ### Flamegraphs
@@ -216,9 +253,12 @@ cargo fmt --check
 ## Organization
 
 - `permcore`: Shared building blocks, library crate
-  - permutation type, equality polynomial, Fiat-Shamir transcript, PCS trait
+  - permutation type, equality polynomial, Fiat-Shamir transcript,
+    PCS trait, sumcheck, zerocheck, and product-check PIOPs
 - `biperm`: BiPerm implementation, library crate
 - `mulperm`: MulPerm implementation, library crate
+- `prodperm`: HyperPlonk-style grand-product, library crate
+  - benchmarked against BiPerm, under Hyrax
 - `hyrax`: Hyrax PCS backend, library crate
   - binding-only; dense + sparse
 
@@ -231,7 +271,7 @@ cargo fmt --check
 
 ## Development notes
 
-- Permutation check $f(\sigma(x)) = g(x)$ reduces to a sumcheck via Lemma 4:
+- Permutation check $g(\sigma(x)) = f(x)$ reduces to a sumcheck via Lemma 4:
   - $\Sigma_{x \in B_\mu} f(x) \cdot 1_\sigma(x, \alpha) = g(\alpha)$
 - How $1_\sigma (X, Y)$ is arithmetized (eg. BiPerm, MulPerm)
   - BiPerm: indicator polys are $n^{1.5}$, needs a sparse-friendly PCS
@@ -266,6 +306,7 @@ linperm/
 ├── permcore/       # Shared building blocks
 ├── biperm/         # BiPerm prove/verify (indexed)
 ├── mulperm/        # Currently re-exports permcore
+├── prodperm/       # Grand-product prove/verify (indexed)
 ├── hyrax/          # Hyrax PCS backend (dense)
 └── scripts/        # Developer tooling
 ```
@@ -277,7 +318,9 @@ linperm/
 - [ ] PCS backend support (eg. Hyrax, Multi-linear KZG)
   - [x] Hyrax (Dense, trusted-setup, binding-only)
   - [ ] Hyrax (Sparse, transparent, hiding)
-- [ ] Benchmarks by itself, w/ HyperPlonk
+- [x] Benchmarks by themselves, w/ HyperPlonk
+  - [x] Grand-product baseline (`prodperm`) over Hyrax
+  - [ ] Batched openings, then re-run both sides
 
 ### Optional
 

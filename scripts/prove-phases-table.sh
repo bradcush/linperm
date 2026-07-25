@@ -1,22 +1,32 @@
 #!/usr/bin/env bash
 #
-# Render the prove phase-breakdown table from target/prove_phases.csv,
-# the raw numbers written by `cargo bench --bench phases`.
+# Render one protocol's prove phase-breakdown table, the raw
+# numbers written by `cargo bench -p <protocol> --bench phases`.
 # Percentages are derived here from the raw ms.
 #
-# Usage: scripts/prove-phases-table.sh [path-to-csv]
+# Usage: scripts/prove-phases-table.sh [biperm|prodperm]
 set -euo pipefail
 
-csv="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/target/prove_phases.csv}"
+proto="${1:-biperm}"
+case "$proto" in
+biperm | prodperm) ;;
+*)
+  echo "usage: $(basename "$0") [biperm|prodperm]" >&2
+  exit 2
+  ;;
+esac
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+csv="$root/target/${proto}_prove_phases.csv"
 
 if [[ ! -f $csv ]]; then
-  echo "no CSV at $csv; run: cargo bench --bench phases" >&2
+  echo "no CSV at $csv; run: cargo bench -p $proto --bench phases" >&2
   exit 1
 fi
 
-awk -F, '
+awk -F, -v proto="$proto" '
 BEGIN {
-    print "biperm_prove phase breakdown\n"
+    print proto "_prove phase breakdown\n"
     printf "%-6s %3s   %13s   %13s   %13s   %13s   %11s\n", \
         "scheme", "mu", "commit", "aux", "sumcheck", "opens", "total"
 }

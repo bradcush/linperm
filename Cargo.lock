@@ -953,6 +953,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "prodperm"
+version = "0.1.0"
+dependencies = [
+ "ark-bn254",
+ "ark-ff",
+ "ark-poly",
+ "ark-serialize",
+ "ark-std",
+ "criterion",
+ "hyrax",
+ "permcore",
+ "pprof",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "quick-xml"
 version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

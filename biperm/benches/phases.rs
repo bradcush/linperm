@@ -3,12 +3,12 @@
 //!
 //! `index` has no mid-call Fiat-Shamir challenges, so its two phases
 //! (`aux_gen`, build the sparse indicators; `commit`, PCS-commit them) are
-//! reconstructed externally by re-calling public steps → `index_phases.csv`.
+//! reconstructed externally by re-calling public steps → `biperm_index_phases.csv`.
 //!
 //! `prove` squeezes $\alpha$ and the sumcheck `r` mid-call, so its phases
 //! can't be reconstructed without replaying the whole call. It's instrumented
 //! in-place with `tracing` spans instead; a capturing layer sums each span's
-//! elapsed time by name (PCS opens share `opens` name) → `prove_phases.csv`.
+//! elapsed time by name (PCS opens share `opens` name) → `biperm_prove_phases.csv`.
 //!
 //! Plain `Instant` over a few iterations, enough to read phase
 //! ratios, not a rigorous benchmark for absolute timings.
@@ -45,8 +45,8 @@ const MUS: [usize; 4] = [8, 10, 12, 14];
 const ITERS: usize = 10;
 
 // Output paths relative to the crate dir.
-const INDEX_CSV_REL_PATH: &str = "/../target/index_phases.csv";
-const PROVE_CSV_REL_PATH: &str = "/../target/prove_phases.csv";
+const INDEX_CSV_REL_PATH: &str = "/../target/biperm_index_phases.csv";
+const PROVE_CSV_REL_PATH: &str = "/../target/biperm_prove_phases.csv";
 
 // `prove` span names, in report column order. `commit`, `aux`, and
 // `sumcheck` time one region each; `opens` aggregates the three PCS opens.
