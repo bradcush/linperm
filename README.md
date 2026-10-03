@@ -13,19 +13,19 @@ Use at your own risk.
 ## Paper
 
 - [Cryptology ePrint Archive](https://eprint.iacr.org/2025/1850)
-- [Linear\*-Time Permuation Check](2025-ltpc.pdf)
+- [Linear\*-Time Permutation Check](2025-ltpc.pdf)
 - [HyperPlonk](https://eprint.iacr.org/2022/1355), ProdPerm's product check
 
-### Relevant sections
+### Relevant LTPC sections
 
 - §4.3 Sumcheck protocol: basis for both PIOPs.
 - §4.4 Multilinear PCS: drives our PolynomialCommitment trait shape.
 - §4.6 Lemma 4: the permutation-to-sumcheck reduction.
 - §6 BiPerm + Algorithm 2: first PIOP to implement.
 - §7 MulPerm + Algorithms 3-7: second PIOP to implement.
-- §7.3 Bucketing: the trick that gets MulPerm to $n \cdot O(\sqrt(log n))$.
+- §7.3 Bucketing: the trick that gets MulPerm to $n \cdot O(\sqrt{log(n)})$.
 
-## Example
+## BiPerm example
 
 This example comes directly from integration tests in BiPerm and shows what the
 full protocol looks like using the Hyrax PCS. For an annotated implementation,
@@ -95,6 +95,15 @@ fn biperm_round_trip() {
 cargo build
 ```
 
+### Features
+
+- `std` (default): disable with `--no-default-features` for `no_std`
+- `parallel`: forwards to arkworks' `parallel` features; not our own yet
+
+``` sh
+cargo build --no-default-features
+```
+
 ## Testing
 
 Unit, integration, doc tests, and benches:
@@ -103,7 +112,7 @@ Unit, integration, doc tests, and benches:
 # All but benches
 cargo test
 
-# Just benches
+# Test the benches would run
 cargo test --benches
 ```
 
@@ -124,7 +133,7 @@ Runs full measurement loops:
 cargo bench
 ```
 
-### Benchmark Index report
+### HTML report
 
 ``` sh
 xdg-open target/criterion/report/index.html
@@ -143,21 +152,25 @@ Criterion can snapshot a run and diff:
 
 ``` sh
 # Snapshot the index bench under a name
-cargo bench --bench index -- --save-baseline sparse
+cargo bench --bench index -- --save-baseline before
 ```
 
 After a change, compare against it:
 
 ``` sh
 # Compare current index against baseline
-cargo bench --bench index -- --baseline sparse
+cargo bench --bench index -- --baseline before
 ```
 
 Or run a specific argument:
 
 ``` sh
-# index, prove, verify
-cargo bench -p biperm  --bench verify
+# w/ index, prove, verify
+cargo bench -p biperm --bench verify
+cargo bench -p prodperm --bench verify
+
+# eq table building block
+cargo bench -p permcore --bench eq
 ```
 
 *`verify` also prints a verifier footprint table per scheme and $\mu$.*
@@ -265,7 +278,7 @@ cargo fmt --check
   - permutation type, equality polynomial, Fiat-Shamir transcript,
     PCS trait, sumcheck, zerocheck, and product-check PIOPs
 - `biperm`: BiPerm implementation, library crate
-- `mulperm`: MulPerm implementation, library crate
+- `mulperm`: MulPerm, library crate (not yet implemented)
 - `prodperm`: HyperPlonk-style grand-product, library crate
   - benchmarked against BiPerm, under Hyrax
 - `hyrax`: Hyrax PCS backend, library crate
@@ -274,7 +287,7 @@ cargo fmt --check
 ## Plan
 
 - Use AI to assist in building a first version
-- Walk though decisions, understand why's, what's best
+- Walk through decisions, understand why's, what's best
 - Separate dependency libs (internal/external) from paper code
 - Specify learning in SKILL.md format to run through again
 
@@ -285,7 +298,7 @@ cargo fmt --check
 - How $1_\sigma (X, Y)$ is arithmetized (eg. BiPerm, MulPerm)
   - BiPerm: indicator polys are $n^{1.5}$, needs a sparse-friendly PCS
     (eg. Hyrax, Dory, KZH) to keep commitment cost linear-time
-  - MulPerm: bucketing keeps prover at $n \cdot O(\sqrt(log n))$, any ML PCS
+  - MulPerm: bucketing keeps prover at $n \cdot O(\sqrt{log(n)})$, any ML PCS
 - Both protocols PIOPs (Polynomial Interactive Oracle Proofs)
   - Multi-linear polynomial oracles, instantiated w/ PCS and Fiat-Shamir
 - Soundness scales like $polylog(n)/|F|$
@@ -301,10 +314,10 @@ cargo fmt --check
 ## Implementation
 
 - PCS started w/ a `MockPcs` for Trait (introduced Hyrax)
-- BN254 field/curve, **pairing friendly**, every PCS in paper needs that
+- BN254 field/curve, **pairing friendly**, Dory and KZG would need that
   - [ ] Read more about this curve, details of it, why we choose it
 - [ ] Multiple small crates (mirrors Hyperplonk layout)
-- [ ] We use (merlin/spongefish), do we want others?
+- [ ] We use Merlin transcripts, do we want any others?
 
 > Ethereum precompiles (EIP-196/197).<br>
 > BLS12-381 is the obvious upgrade if we ever need $\geq$ 128-bit security.<br>
@@ -316,7 +329,7 @@ linperm/
 ├── biperm/         # BiPerm prove/verify (indexed)
 ├── mulperm/        # Currently re-exports permcore
 ├── prodperm/       # Grand-product prove/verify (indexed)
-├── hyrax/          # Hyrax PCS backend (dense)
+├── hyrax/          # Hyrax PCS backend (dense + sparse)
 └── scripts/        # Developer tooling
 ```
 
@@ -333,11 +346,11 @@ linperm/
 
 ### Optional
 
-- Prover-provided permutation
-- Lookup generalization
-- Benchmarks
-- Paralellism
-- FFT-based speedups
+- [ ] Prover-provided permutation
+- [ ] Lookup generalization
+- [x] Benchmarks
+- [ ] Parallelism
+- [ ] FFT-based speedups
 
 ## Skills
 

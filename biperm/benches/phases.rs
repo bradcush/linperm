@@ -219,6 +219,12 @@ fn write_prove_csv(rows: &[ProveRow]) {
 }
 
 fn main() {
+    // `cargo bench` passes `--bench`, `cargo test --benches` doesn't; skip
+    // the unoptimized full run there, which would also overwrite the CSVs.
+    // We only want to run this and write CSVs for optimiized builds.
+    if !std::env::args().any(|a| a == "--bench") {
+        return;
+    }
     let mut rng = test_rng();
 
     // index breakdown, external reconstruction
