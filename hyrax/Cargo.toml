@@ -12,6 +12,7 @@ permcore.workspace = true
 ark-ff.workspace = true
 ark-ec.workspace = true
 ark-poly.workspace = true
+ark-serialize.workspace = true
 ark-std.workspace = true
 
 [dev-dependencies]
@@ -25,6 +26,7 @@ std = [
     "ark-ff/std",
     "ark-ec/std",
     "ark-poly/std",
+    "ark-serialize/std",
     "ark-std/std",
 ]
 parallel = [

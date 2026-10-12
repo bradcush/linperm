@@ -59,6 +59,15 @@ impl Transcript {
         self.inner.append_message(label, &buf);
     }
 
+    /// Squeeze `dest.len()` raw bytes under `label`, for consumers that
+    /// need bytes rather than a field element (e.g. hashing to a curve).
+    ///
+    /// Takes a domain-separation label for this squeeze and a
+    /// destination buffer to fill; its length sets how many bytes.
+    pub fn challenge_bytes(&mut self, label: &'static [u8], dest: &mut [u8]) {
+        self.inner.challenge_bytes(label, dest);
+    }
+
     /// Squeeze a single unbiased prime-field challenge.
     ///
     /// Pulls $\lceil \log_2 p \rceil / 8 + 16$ bytes from the

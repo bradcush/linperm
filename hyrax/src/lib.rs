@@ -8,13 +8,15 @@
 //! verifier checks $\sum_i L_i C_i = \sum_j w_j g_j$ (Pedersen binding forces
 //! $w = L^\top M$) and $\langle w, R \rangle = \mathrm{value}$.
 //!
-//! This is the **binding-only, naive** variant: no blinding (so not hiding /
-//! zero-knowledge) and no inner-product compression (so the proof is the
-//! $O(\sqrt{N})$ vector $w$ rather than $O(\log N)$). The transcript is
-//! therefore unused, there are no squeezed challenges yet. Commitment and
-//! verifier costs are already $O(\sqrt{N})$; the prover commits/opens in
-//! $O(N)$ on a dense poly or $O(\mathrm{nnz})$ on an `MleRef::Sparse`, with
-//! identical commitments either way.
+//! Setup is **transparent**: generators are hashed to the curve from a fixed
+//! public label, so anyone can recompute them and no one knows their pairwise
+//! discrete logs. This is the **binding-only, naive** variant: no blinding
+//! (so not hiding / zero-knowledge) and no inner-product compression
+//! (so the proof is the $O(\sqrt{N})$ vector $w$ rather than $O(\log N)$).
+//! The transcript is therefore unused, there are no squeezed challenges yet.
+//! Commitment and verifier costs are already $O(\sqrt{N})$; the prover
+//! commits/opens in $O(N)$ on a dense poly or $O(\mathrm{nnz})$ on an
+//! `MleRef::Sparse`, with identical commitments either way.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -26,7 +28,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
-use ark_ec::CurveGroup;
+use ark_ec::{AffineRepr, CurveGroup};
+use ark_serialize::CanonicalSerialize;
 use ark_std::rand::RngCore;
 
 use permcore::pcs::MleRef;
@@ -37,10 +40,11 @@ use matrix::{
     split_vars,
 };
 
-/// Public parameters: the column generators (with unknown pairwise discrete
-/// logs) and the variable bound they were sized for. `HyraxKey` equals Hyrax's
-/// verifier key equals its prover key, both hold the full generator set, which
-/// is why the verifier is $O(\sqrt{N})$ rather than constant-time.
+/// Public parameters: the column generators (hashed to the curve,
+/// so with unknown pairwise discrete logs) and the variable bound
+/// they were sized for. `HyraxKey` equals Hyrax's verifier key equals
+/// its prover key, both hold the full generator set, which is why
+/// the verifier is $O(\sqrt{N})$ rather than constant-time.
 #[derive(Clone, Debug)]
 pub struct HyraxKey<G: CurveGroup> {
     pub generators: Vec<G::Affine>,
@@ -71,20 +75,20 @@ impl<G: CurveGroup> PolynomialCommitment<G::ScalarField> for Hyrax<G> {
     type Proof = Vec<G::ScalarField>;
     type Error = HyraxError;
 
-    /// Sample the column generators, one for each.
+    /// Derive the column generators transparently, one for each.
     ///
-    /// Generators come from `rng`, so binding rests on the sampler
-    /// being honest (nobody learns the pairwise discrete logs),
-    /// trusted-setup. A transparent, recomputable variant would
-    /// derive them by hashing a public seed to the curve.
+    /// Each generator is hashed to the curve from a public label
+    /// and its index, so `rng` is unused: no toxic waste, and any
+    /// verifier can recompute the key. Generator `i` is the same
+    /// for every `max_num_vars`, so smaller keys are prefixes.
     fn setup<R: RngCore>(
         max_num_vars: usize,
-        rng: &mut R,
+        _rng: &mut R,
     ) -> Result<(Self::ProverKey, Self::VerifierKey), Self::Error> {
         let (_, n_col) = split_vars(max_num_vars);
         let count = 1usize << n_col;
         let generators: Vec<G::Affine> =
-            (0..count).map(|_| G::rand(rng).into_affine()).collect();
+            (0..count).map(hash_to_generator::<G>).collect();
         let key = HyraxKey {
             generators,
             max_num_vars,
@@ -200,6 +204,28 @@ impl<G: CurveGroup> PolynomialCommitment<G::ScalarField> for Hyrax<G> {
     }
 }
 
+/// Hash index `i` to a curve point by try-and-increment: squeeze candidate
+/// x-coordinate bytes from a transcript bound to `i` until they decode to a
+/// point, then clear the cofactor. arkworks 0.5 ships no IETF hash-to-curve
+/// map for BN254, and try-and-increment's variable time is harmless here
+/// since the inputs are public. Takes `i`, the generator index. Returns a
+/// non-identity point in the prime-order subgroup, deterministic in `i`.
+fn hash_to_generator<G: CurveGroup>(i: usize) -> G::Affine {
+    let mut transcript = Transcript::new(b"linperm-hyrax-generators");
+    transcript.append_message(b"index", &(i as u64).to_le_bytes());
+    let mut buf = vec![0u8; G::Affine::zero().compressed_size()];
+    loop {
+        transcript.challenge_bytes(b"candidate", &mut buf);
+        // Check (try) that it decodes to a curve point
+        if let Some(p) = G::Affine::from_random_bytes(&buf) {
+            let p = p.clear_cofactor();
+            if !p.is_zero() {
+                return p;
+            }
+        }
+    }
+}
+
 /// Commit a sparse poly's rows: one Pedersen MSM per row over only that row's
 /// nonzero `(generator, scalar)` pairs, drawn from `(index, value)` stream.
 /// Empty rows MSM to the identity, so the commitment is byte-identical to the
@@ -232,6 +258,7 @@ mod tests {
     use ark_poly::{
         DenseMultilinearExtension, Polynomial, SparseMultilinearExtension,
     };
+    use ark_std::rand::SeedableRng;
     use ark_std::test_rng;
 
     type H = Hyrax<G1Projective>;
@@ -390,6 +417,39 @@ mod tests {
                 H::verify(&vk, &c_sparse, &point, v_s, &w_s, &mut t_v).unwrap(),
                 "verify, num_vars = {num_vars}"
             );
+        }
+    }
+
+    #[test]
+    // Transparent setup means the key is a function of `max_num_vars`
+    // alone, whatever rng is passed, so verifiers can recompute it.
+    fn setup_ignores_rng() {
+        let mut rng = test_rng();
+        let (a, _) = H::setup(6, &mut rng).unwrap();
+        let mut other = ark_std::rand::rngs::StdRng::seed_from_u64(1);
+        let (b, _) = H::setup(6, &mut other).unwrap();
+        assert_eq!(a.generators, b.generators);
+    }
+
+    #[test]
+    fn smaller_key_is_prefix() {
+        let mut rng = test_rng();
+        let (small, _) = H::setup(2, &mut rng).unwrap();
+        let (large, _) = H::setup(6, &mut rng).unwrap();
+        let n = small.generators.len();
+        assert_eq!(small.generators[..], large.generators[..n]);
+    }
+
+    #[test]
+    fn generators_distinct_and_nonzero() {
+        let mut rng = test_rng();
+        let (pk, _) = H::setup(8, &mut rng).unwrap();
+        let g = &pk.generators;
+        assert!(g.iter().all(|p| !p.is_zero()));
+        for i in 0..g.len() {
+            for j in (i + 1)..g.len() {
+                assert_ne!(g[i], g[j], "generators {i} and {j}");
+            }
         }
     }
 
