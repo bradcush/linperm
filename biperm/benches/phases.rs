@@ -1,4 +1,4 @@
-//! Phase breakdown of `biperm::index` and `biperm::prove`.
+//! Phase breakdown of `biperm::index`, `biperm::prove`, and `biperm::verify`.
 //! Non-Criterion harness writing per-phase numbers to `target/`.
 //!
 //! `index` has no mid-call Fiat-Shamir challenges, so its two phases
@@ -9,6 +9,8 @@
 //! can't be reconstructed without replaying the whole call. It's instrumented
 //! in-place with `tracing` spans instead; a capturing layer sums each span's
 //! elapsed time by name (PCS opens share `opens` name) -> `biperm_prove_phases.csv`.
+//! `verify` squeezes the same challenges, so it's spanned the same way (`sumcheck`,
+//! and the four PCS verifies share `pcs`) -> `biperm_verify_phases.csv`.
 //!
 //! Plain `Instant` over a few iterations, enough to read phase
 //! ratios, not a rigorous benchmark for absolute timings.
@@ -16,6 +18,8 @@
 //! Each breakdown carries a `shyrax` (sparse) and a `dhyrax` (dense) row.
 //! The `index` row densifies its reconstructed indicators directly; `prove`
 //! selects the representation via `biperm::index_with`, wrapper-free.
+//! `verify` carries a single `hyrax` row: sparse and dense commitments
+//! are byte-identical, so the verifier can't tell them apart.
 
 mod common;
 
@@ -36,7 +40,7 @@ use tracing_subscriber::registry::LookupSpan;
 use biperm::permcore::{
     MleRef, MockPcs, Permutation, PolynomialCommitment, Transcript,
 };
-use biperm::{index_with, prove, IndicatorRepr};
+use biperm::{index_with, prove, verify, IndicatorRepr};
 use hyrax::Hyrax;
 
 use common::instance;
@@ -47,10 +51,15 @@ const ITERS: usize = 10;
 // Output paths relative to the crate dir.
 const INDEX_CSV_REL_PATH: &str = "/../target/biperm_index_phases.csv";
 const PROVE_CSV_REL_PATH: &str = "/../target/biperm_prove_phases.csv";
+const VERIFY_CSV_REL_PATH: &str = "/../target/biperm_verify_phases.csv";
 
 // `prove` span names, in report column order. `commit`, `aux`, and
 // `sumcheck` time one region each; `opens` aggregates the three PCS opens.
 const PROVE_PHASES: [&str; 4] = ["commit", "aux", "sumcheck", "opens"];
+
+// `verify` span names, in report column order. `sumcheck` times
+// one region; `pcs` aggregates the four PCS verifies.
+const VERIFY_PHASES: [&str; 2] = ["sumcheck", "pcs"];
 
 /// Mean (aux_gen, commit) durations for `index` under PCS scheme `P`.
 /// With `dense`, indicators are densified before commit (the slow `O(N)`
@@ -166,11 +175,42 @@ fn time_prove<P: PolynomialCommitment<Fr>>(
     })
 }
 
+/// Mean per-phase durations (in `VERIFY_PHASES` order) for `verify` under
+/// PCS scheme `P`, read from the span timer. The proof is built once,
+/// outside the timed region; each iteration verifies it afresh.
+fn time_verify<P: PolynomialCommitment<Fr>>(
+    perm: &Permutation,
+    f: &DenseMultilinearExtension<Fr>,
+    g: &DenseMultilinearExtension<Fr>,
+    rng: &mut impl RngCore,
+    timings: &Timings,
+) -> [Duration; 2] {
+    let (pk, vk) = P::setup(perm.num_vars() * 3 / 2, rng).unwrap();
+    let sparse = IndicatorRepr::Sparse;
+    let (p_idx, v_idx) = index_with::<Fr, P>(&pk, perm, sparse).unwrap();
+    let proof =
+        prove(&pk, &p_idx, f, g, &mut Transcript::new(b"bench")).unwrap();
+    // Warm up, then drop its timings (and `prove`'s).
+    verify(&vk, &v_idx, &proof, &mut Transcript::new(b"bench")).unwrap();
+    timings.clear();
+    for _ in 0..ITERS {
+        let mut t = Transcript::new(b"bench");
+        verify(&vk, &v_idx, &proof, &mut t).unwrap();
+    }
+    let map = timings.snapshot();
+    VERIFY_PHASES.map(|name| {
+        map.get(name).copied().unwrap_or(Duration::ZERO) / ITERS as u32
+    })
+}
+
 /// scheme, $\mu$, and the two `index` phase durations.
 type RowIndex = (&'static str, usize, Duration, Duration);
 
 /// scheme, $\mu$, and the `prove` phase durations.
 type ProveRow = (&'static str, usize, [Duration; 4]);
+
+/// scheme, $\mu$, and the `verify` phase durations.
+type VerifyRow = (&'static str, usize, [Duration; 2]);
 
 /// Write the rows as CSV (raw ms; percentages are
 /// derivable) to the workspace `target/` dir.
@@ -209,6 +249,27 @@ fn write_prove_csv(rows: &[ProveRow]) {
             ms(ph[1]),
             ms(ph[2]),
             ms(ph[3]),
+            ms(total),
+        ));
+    }
+    match std::fs::write(&path, out) {
+        Ok(()) => println!("wrote {path}"),
+        Err(e) => eprintln!("failed to write {path}: {e}"),
+    }
+}
+
+/// Write the `verify` phase rows as CSV (raw ms;
+/// percentages derivable) to the workspace `target/` dir.
+fn write_verify_csv(rows: &[VerifyRow]) {
+    let path = format!("{}{VERIFY_CSV_REL_PATH}", env!("CARGO_MANIFEST_DIR"));
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    let mut out = String::from("scheme,mu,sumcheck_ms,pcs_ms,total_ms\n");
+    for &(scheme, mu, ph) in rows {
+        let total: Duration = ph.iter().sum();
+        out.push_str(&format!(
+            "{scheme},{mu},{:.3},{:.3},{:.3}\n",
+            ms(ph[0]),
+            ms(ph[1]),
             ms(total),
         ));
     }
@@ -279,4 +340,20 @@ fn main() {
         prove_rows.push(("shyrax", mu, ph));
     }
     write_prove_csv(&prove_rows);
+
+    // verify breakdown, in-call spans (same subscriber)
+    let mut verify_rows: Vec<VerifyRow> = Vec::new();
+    for mu in MUS {
+        let (perm, f, g) = instance(mu, &mut rng);
+        let ph = time_verify::<MockPcs<Fr>>(&perm, &f, &g, &mut rng, &timings);
+        verify_rows.push(("mock", mu, ph));
+    }
+    for mu in MUS {
+        let (perm, f, g) = instance(mu, &mut rng);
+        let ph = time_verify::<Hyrax<G1Projective>>(
+            &perm, &f, &g, &mut rng, &timings,
+        );
+        verify_rows.push(("hyrax", mu, ph));
+    }
+    write_verify_csv(&verify_rows);
 }

@@ -282,6 +282,7 @@ pub fn verify<F: PrimeField, P: PolynomialCommitment<F>>(
     transcript.append(b"f_commit", &proof.f_commit);
     transcript.append(b"g_commit", &proof.g_commit);
     let alpha: Vec<F> = transcript.challenge_vec(b"alpha", num_vars);
+    let pcs_span = info_span!("pcs").entered();
     let alpha_ok = P::verify(
         vk,
         &proof.g_commit,
@@ -291,9 +292,11 @@ pub fn verify<F: PrimeField, P: PolynomialCommitment<F>>(
         transcript,
     )
     .map_err(BiPermError::Pcs)?;
+    drop(pcs_span);
     if !alpha_ok {
         return Err(BiPermError::PcsVerifyFailed);
     }
+    let sumcheck_span = info_span!("sumcheck").entered();
     let out = sumcheck::verify(
         proof.g_at_alpha,
         num_vars,
@@ -301,7 +304,9 @@ pub fn verify<F: PrimeField, P: PolynomialCommitment<F>>(
         &proof.sumcheck,
         transcript,
     )?;
+    drop(sumcheck_span);
     let r = &out.challenges;
+    let pcs_span = info_span!("pcs").entered();
     let r_ok = P::verify(
         vk,
         &proof.f_commit,
@@ -311,6 +316,7 @@ pub fn verify<F: PrimeField, P: PolynomialCommitment<F>>(
         transcript,
     )
     .map_err(BiPermError::Pcs)?;
+    drop(pcs_span);
     if !r_ok {
         return Err(BiPermError::PcsVerifyFailed);
     }
@@ -318,6 +324,7 @@ pub fn verify<F: PrimeField, P: PolynomialCommitment<F>>(
     let (alpha_l, alpha_r) = alpha.split_at(num_vars / 2);
     let point_l: Vec<F> = r.iter().chain(alpha_l).copied().collect();
     let point_r: Vec<F> = r.iter().chain(alpha_r).copied().collect();
+    let pcs_span = info_span!("pcs").entered();
     let ind_l_ok = P::verify(
         vk,
         &index.ind_l_commit,
@@ -327,9 +334,11 @@ pub fn verify<F: PrimeField, P: PolynomialCommitment<F>>(
         transcript,
     )
     .map_err(BiPermError::Pcs)?;
+    drop(pcs_span);
     if !ind_l_ok {
         return Err(BiPermError::PcsVerifyFailed);
     }
+    let pcs_span = info_span!("pcs").entered();
     let ind_r_ok = P::verify(
         vk,
         &index.ind_r_commit,
@@ -339,6 +348,7 @@ pub fn verify<F: PrimeField, P: PolynomialCommitment<F>>(
         transcript,
     )
     .map_err(BiPermError::Pcs)?;
+    drop(pcs_span);
     if !ind_r_ok {
         return Err(BiPermError::PcsVerifyFailed);
     }

@@ -191,18 +191,21 @@ ProdPerm $\beta, \gamma$ and the product check's), so its phases can't be
 reconstructed externally; it's instrumented in-place with `tracing` spans
 (no-op without a subscriber) that the bench's capturing layer times. The phases
 are `commit`, `aux`, `sumcheck`, and `opens` (the PCS opens summed via a shared
-span name: four for BiPerm, eight for ProdPerm).
+span name: four for BiPerm, eight for ProdPerm). `verify` squeezes the same
+challenges, spanned the same way: `sumcheck` and `pcs` (summed like `opens`).
 
 BiPerm's tables carry `shyrax` (sparse) and `dhyrax` (dense) rows, so you can
 see which phase the sparse PCS moves: the `index` `commit` and the `prove`
-`opens`. ProdPerm's carry `mock` and `hyrax`.
+`opens`. ProdPerm's carry `mock` and `hyrax`. Both `verify` tables carry `mock`
+and `hyrax` only, since sparse and dense commitments are byte-identical.
 
 ``` sh
 cargo bench --bench phases
 
 # Render as tables
 scripts/index-phases-table.sh # biperm
-scripts/prove-phases-table.sh prodperm
+scripts/prove-phases-table.sh # biperm
+scripts/verify-phases-table.sh prodperm
 ```
 
 ### Protocol comparison
@@ -212,15 +215,18 @@ Reads the CSVs already on disk; `--run` regenerates both back-to-back first,
 which is the only way to guarantee both protocols saw the same machine state.
 
 `real` (default) compares `shyrax` against `hyrax`, sparse BiPerm against
-dense ProdPerm; `mock` compares the PIOP cost with no curve operations.
-BiPerm's `dhyrax` has no ProdPerm counterpart because the arithmetization
-doesn't matter re: sparsity.
+dense ProdPerm (`hyrax` against `hyrax` for `verify`); `mock` compares the
+PIOP cost with no curve operations. MockPcs verifies by evaluating the whole
+polynomial, so the `mock` `verify` `pcs` column isn't a PCS cost. BiPerm's
+`dhyrax` has no ProdPerm counterpart because the arithmetization doesn't matter
+due to the fact that sparsity doesn't matter in ProdPerm.
 
 One per call, mirroring the table scripts:
 
 ``` sh
 scripts/index-phases-compare.sh
 scripts/prove-phases-compare.sh
+scripts/verify-phases-compare.sh
 
 # PIOP cost only, no curve operations w/ mock
 scripts/prove-phases-compare.sh mock

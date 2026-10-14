@@ -246,9 +246,13 @@ pub fn verify<F: PrimeField, P: PolynomialCommitment<F>>(
     let beta: F = transcript.challenge(b"beta");
     let gamma: F = transcript.challenge(b"gamma");
     transcript.append(b"v_commit", &proof.v_commit);
+    let sumcheck_span = info_span!("sumcheck").entered();
     let out = prodcheck::verify::<F>(num_vars, &proof.sumcheck, transcript)?;
+    drop(sumcheck_span);
     let rho = &out.challenges;
-    // Same order as `prove` opened them, the transcript is shared
+    // Same order as `prove` opened
+    // them, the transcript is shared
+    let pcs_span = info_span!("pcs").entered();
     check(vk, &proof.f_commit, rho, &proof.f, transcript)?;
     check(vk, &proof.g_commit, rho, &proof.g, transcript)?;
     check(vk, &index.sigma_commit, rho, &proof.sigma, transcript)?;
@@ -264,6 +268,7 @@ pub fn verify<F: PrimeField, P: PolynomialCommitment<F>>(
     check(vk, &proof.v_commit, left, &proof.v_left, transcript)?;
     check(vk, &proof.v_commit, right, &proof.v_right, transcript)?;
     check(vk, &proof.v_commit, root, &proof.v_root, transcript)?;
+    drop(pcs_span);
     // The grand product itself. Everything above only says the
     // tree is well formed; this is what says the multisets match.
     if proof.v_root.value != F::one() {
