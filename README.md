@@ -348,6 +348,15 @@ linperm/
 
 - [x] Sumcheck per MulPerm
 - [ ] Prover/verifier for MulPerm
+  - [x] Index: $\tilde{\sigma}$ table, $\tilde{\alpha}$, groups
+  - [ ] Partial products: Algorithm 4 table lookups
+  - [ ] Sumcheck 1: $f \cdot \prod_j \tilde{p}$, send $v_j$
+  - [ ] Sumcheck 2: slow oracle, then direct prover
+  - [ ] End to end: prove/verify, tamper tests
+  - [ ] Padding: any $\mu$, not just powers of two
+  - [ ] Benches: index/prove/verify phases, baseline note
+  - [ ] Bucketing: Algorithms 6 and 11, bit-identical messages
+  - [ ] $\ell$ benchmarks, three-way comparison with BiPerm/ProdPerm
 - [ ] PCS backend support (eg. Hyrax, Multi-linear KZG)
   - Hyrax
     - [x] Dense + sparse
