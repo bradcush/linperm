@@ -19,11 +19,14 @@ Use at your own risk.
 ### Relevant LTPC sections
 
 - §4.3 Sumcheck protocol: basis for both PIOPs.
-- §4.4 Multilinear PCS: drives our PolynomialCommitment trait shape.
+- §4.4 Multilinear PCS: our PolynomialCommitment trait shape.
 - §4.6 Lemma 4: the permutation-to-sumcheck reduction.
 - §6 BiPerm + Algorithm 2: first PIOP to implement.
 - §7 MulPerm + Algorithms 3-7: second PIOP to implement.
+- §7.1 Algorithm 4: MulPerm's partial products as per-group table lookups.
 - §7.3 Bucketing: the trick that gets MulPerm to $n \cdot O(\sqrt{log(n)})$.
+- §7.4 Setting $\ell$: $\ell = \sqrt{\mu}$ balances the two sumchecks.
+- Appendix B Algorithm 11: collapsing the bucketing tables.
 
 ## BiPerm example
 
@@ -284,7 +287,8 @@ cargo fmt --check
   - permutation type, equality polynomial, Fiat-Shamir transcript,
     PCS trait, sumcheck, zerocheck, and product-check PIOPs
 - `biperm`: BiPerm implementation, library crate
-- `mulperm`: MulPerm, library crate (not yet implemented)
+- `mulperm`: MulPerm implementation, library crate
+  - index only so far; power-of-two $\mu$ only
 - `prodperm`: HyperPlonk-style grand-product, library crate
   - benchmarked against BiPerm, under Hyrax
 - `hyrax`: Hyrax PCS backend, library crate
@@ -314,7 +318,8 @@ cargo fmt --check
 ### Dependencies
 
 - `arkworks`: multi-linear extensions, fields, curves, serialization
-  - [ ] Not sure what serialization is referring to here?
+  - Serialization: `CanonicalSerialize`/`CanonicalDeserialize` turn
+    commitments and proofs into bytes and back (required by our PCS trait)
 - [ ] HyperPlonk, Jolt, Plonky3, Spartan2, Binius relationships?
 
 ## Implementation
@@ -333,7 +338,7 @@ cargo fmt --check
 linperm/
 ├── permcore/       # Shared building blocks
 ├── biperm/         # BiPerm prove/verify (indexed)
-├── mulperm/        # Currently re-exports permcore
+├── mulperm/        # MulPerm index (in progress)
 ├── prodperm/       # Grand-product prove/verify (indexed)
 ├── hyrax/          # Hyrax PCS backend (dense + sparse)
 └── scripts/        # Developer tooling
@@ -344,8 +349,11 @@ linperm/
 - [x] Sumcheck per MulPerm
 - [ ] Prover/verifier for MulPerm
 - [ ] PCS backend support (eg. Hyrax, Multi-linear KZG)
-  - [x] Hyrax (Dense, trusted-setup, binding-only)
-  - [ ] Hyrax (Sparse, transparent, hiding)
+  - Hyrax
+    - [x] Dense + sparse
+    - [x] Transparent setup
+    - [x] Binding-only
+    - [ ] Hiding
 - [x] Benchmarks by themselves, w/ HyperPlonk
   - [x] Grand-product baseline (`prodperm`) over Hyrax
   - [ ] Batched openings, then re-run both sides
