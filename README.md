@@ -24,6 +24,8 @@ Use at your own risk.
 - §6 BiPerm + Algorithm 2: first PIOP to implement.
 - §7 MulPerm + Algorithms 3-7: second PIOP to implement.
 - §7.1 Algorithm 4: MulPerm's partial products as per-group table lookups.
+- §7.2 Algorithm 5: MulPerm's first sumcheck, reducing to the claims $v_j$.
+- §7.3 Algorithm 7: the second sumcheck, proving $v_j$ from $\tilde{\sigma}$.
 - §7.3 Bucketing: the trick that gets MulPerm to $n \cdot O(\sqrt{log(n)})$.
 - §7.4 Setting $\ell$: $\ell = \sqrt{\mu}$ balances the two sumchecks.
 - Appendix B Algorithm 11: collapsing the bucketing tables.
@@ -292,7 +294,7 @@ cargo fmt --check
 - `prodperm`: HyperPlonk-style grand-product, library crate
   - benchmarked against BiPerm, under Hyrax
 - `hyrax`: Hyrax PCS backend, library crate
-  - binding-only; dense + sparse
+  - transparent setup, binding-only; dense + sparse
 
 ## Plan
 
@@ -313,7 +315,7 @@ cargo fmt --check
   - Multi-linear polynomial oracles, instantiated w/ PCS and Fiat-Shamir
 - Soundness scales like $polylog(n)/|F|$
   - Authors target $n = 2^{32}$, $|F| = 2^{128}$.
-- **No public Rust implementations exist of this.**
+- **No other public Rust implementation of BiPerm/MulPerm.**
 
 ### Dependencies
 
@@ -327,7 +329,7 @@ cargo fmt --check
 - PCS started w/ a `MockPcs` for Trait (introduced Hyrax)
 - BN254 field/curve, **pairing friendly**, Dory and KZG would need that
   - [ ] Read more about this curve, details of it, why we choose it
-- [ ] Multiple small crates (mirrors Hyperplonk layout)
+- [x] Multiple small crates (split per protocol, vs HyperPlonk's per layer)
 - [ ] We use Merlin transcripts, do we want any others?
 
 > Ethereum precompiles (EIP-196/197).<br>
@@ -362,10 +364,11 @@ linperm/
     - [x] Dense + sparse
     - [x] Transparent setup
     - [x] Binding-only
+    - [ ] Batched openings, then re-run
+    - [ ] IPA (log-size openings)
     - [ ] Hiding
 - [x] Benchmarks by themselves, w/ HyperPlonk
   - [x] Grand-product baseline (`prodperm`) over Hyrax
-  - [ ] Batched openings, then re-run both sides
 
 ### Optional
 
@@ -374,6 +377,8 @@ linperm/
 - [x] Benchmarks
 - [ ] Parallelism
 - [ ] FFT-based speedups
+- [ ] Generalized BiPerm: $\ell$ sparse indicators
+  - (Shout-like), could be for benchmarks
 
 ## Skills
 
