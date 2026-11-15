@@ -14,9 +14,10 @@ pub use permcore;
 use alloc::vec::Vec;
 
 use ark_ff::PrimeField;
-use ark_poly::DenseMultilinearExtension;
+use ark_poly::{DenseMultilinearExtension, Polynomial};
 use permcore::eq::eq_eval_table;
-use permcore::{CoreError, Permutation, PolynomialCommitment};
+use permcore::sumcheck::{self, SumcheckProverOutput};
+use permcore::{CoreError, Permutation, PolynomialCommitment, Transcript};
 
 /// How the $\mu$ bit slots of $\sigma(x)$ split into groups. Slot
 /// $b = j \cdot w + i$ is bit $i \in \[w\]$ of group $j \in [\ell]$.
@@ -235,14 +236,42 @@ pub fn partial_products<F: PrimeField>(
         .collect()
 }
 
+/// Algorithm 5's prover. Sumcheck 1 proves Eq. 8,
+/// $\sum_{x \in B_\mu} f(x) \prod_j \tilde{p}(x, \langle j \rangle) =
+/// g(\alpha)$, over the factors $f$ and the $\ell$ partial products, so
+/// its degree is $\ell + 1$. The sum is Lemma 4's, with
+/// $\mathrm{eq}(\alpha, \sigma(x))$ split into its groups.
+///
+/// Takes $f$ as `f`, the output of [`partial_products`]
+/// as `parts`, and the Fiat–Shamir `transcript`. Returns the
+/// sumcheck output, whose challenges are $\beta \in \mathbb{F}^\mu$, and
+/// $v_j = \tilde{p}(\beta, \langle j \rangle)$ for each $j$. The verifier
+/// checks the final claim as $C_1 = f(\beta) \prod_j v_j$, then
+/// sumcheck 2 proves the $v_j$.
+pub fn sumcheck1_prove<F: PrimeField>(
+    f: &DenseMultilinearExtension<F>,
+    parts: Vec<DenseMultilinearExtension<F>>,
+    transcript: &mut Transcript,
+) -> (SumcheckProverOutput<F>, Vec<F>) {
+    let mut factors = Vec::with_capacity(parts.len() + 1);
+    factors.push(f.clone());
+    factors.extend(parts);
+    let output = sumcheck::prove(&factors, transcript);
+    let p_at_beta = factors[1..]
+        .iter()
+        .map(|p| p.evaluate(&output.challenges))
+        .collect();
+    (output, p_at_beta)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ark_bn254::Fr;
     use ark_ff::UniformRand;
-    use ark_poly::Polynomial;
     use ark_std::test_rng;
     use permcore::eq::eq;
+    use permcore::sumcheck::SumcheckError;
     use permcore::MockPcs;
 
     /// The low `k` bits of `v` as a
@@ -287,6 +316,46 @@ mod tests {
                 eq(&[alpha[b]], &[bit])
             })
             .product()
+    }
+
+    /// Random $f$ and $g$ with $g(\sigma(x)) = f(x)$
+    /// for all $x \in B_\mu$ like we have elsewhere.
+    /// Given some permutation gives consistent pair.
+    fn consistent_pair(
+        perm: &Permutation,
+        rng: &mut impl ark_std::rand::RngCore,
+    ) -> (DenseMultilinearExtension<Fr>, DenseMultilinearExtension<Fr>) {
+        let num_vars = perm.num_vars();
+        let f_evals: Vec<Fr> =
+            (0..perm.size()).map(|_| Fr::rand(rng)).collect();
+        let mut g_evals = alloc::vec![Fr::from(0u64); perm.size()];
+        for x in 0..perm.size() {
+            g_evals[perm.apply(x)] = f_evals[x];
+        }
+        (
+            DenseMultilinearExtension::from_evaluations_vec(num_vars, f_evals),
+            DenseMultilinearExtension::from_evaluations_vec(num_vars, g_evals),
+        )
+    }
+
+    /// Prover side of sumcheck 1 at a random $\alpha$. Returns
+    /// the claim $g(\alpha)$, which the verifier gets from
+    /// $g$'s opening, the sumcheck output, and the $v_j$.
+    /// Working at the PIOP level, just evaluate $g$.
+    fn run_sumcheck1(
+        perm: &Permutation,
+        ell: usize,
+        f: &DenseMultilinearExtension<Fr>,
+        g: &DenseMultilinearExtension<Fr>,
+        rng: &mut impl ark_std::rand::RngCore,
+    ) -> (Fr, SumcheckProverOutput<Fr>, Vec<Fr>) {
+        let num_vars = perm.num_vars();
+        let alpha: Vec<Fr> = (0..num_vars).map(|_| Fr::rand(rng)).collect();
+        let groups = Groups::new(num_vars, ell).unwrap();
+        let parts = partial_products(perm, groups, &alpha).unwrap();
+        let mut p_t = Transcript::new(b"mulperm");
+        let (out, v) = sumcheck1_prove(f, parts, &mut p_t);
+        (g.evaluate(&alpha), out, v)
     }
 
     #[test]
@@ -442,5 +511,62 @@ mod tests {
                 num_vars: 3
             }))
         ));
+    }
+
+    #[test]
+    fn sumcheck1_round_trip() {
+        let mut rng = test_rng();
+        for perm in [sample_perm(), shift_perm()] {
+            let num_vars = perm.num_vars();
+            let (f, g) = consistent_pair(&perm, &mut rng);
+            for ell in [1, 2, num_vars] {
+                let (claim, out, v) =
+                    run_sumcheck1(&perm, ell, &f, &g, &mut rng);
+                assert_eq!(v.len(), ell);
+                let mut v_t = Transcript::new(b"mulperm");
+                let res = sumcheck::verify(
+                    claim,
+                    num_vars,
+                    // Because $f$ and $v$s
+                    ell + 1,
+                    &out.proof,
+                    &mut v_t,
+                )
+                .unwrap();
+                // Both challenges output on each side because we
+                // need them to prove/verify sumcheck2 later.
+                assert_eq!(res.challenges, out.challenges);
+                // $C_1 = f(\beta) \prod_j v_j$
+                let c1 = f.evaluate(&res.challenges) * v.iter().product::<Fr>();
+                assert_eq!(res.final_claim, c1);
+            }
+        }
+    }
+
+    #[test]
+    fn sumcheck1_rejects_inconsistent_pair() {
+        let mut rng = test_rng();
+        let perm = shift_perm();
+        let ell = 2;
+        let (f, _g_good) = consistent_pair(&perm, &mut rng);
+        // Random $g$ unrelated to $f$ and $\sigma$.
+        let g_bad = DenseMultilinearExtension::from_evaluations_vec(
+            perm.num_vars(),
+            (0..perm.size()).map(|_| Fr::rand(&mut rng)).collect(),
+        );
+        let (claim, out, _) = run_sumcheck1(&perm, ell, &f, &g_bad, &mut rng);
+        // The honest round 0 sums to the true $\sum_x f(x) \cdot
+        // eq(\alpha, \sigma(x))$, which isn't `g_bad`'s $g(\alpha)$.
+        let mut v_t = Transcript::new(b"mulperm");
+        assert_eq!(
+            sumcheck::verify(
+                claim,
+                perm.num_vars(),
+                ell + 1,
+                &out.proof,
+                &mut v_t
+            ),
+            Err(SumcheckError::RoundCheckFailed { round: 0 })
+        );
     }
 }
