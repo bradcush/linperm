@@ -14,6 +14,9 @@ Use at your own risk.
 
 - [Cryptology ePrint Archive](https://eprint.iacr.org/2025/1850)
 - [Linear\*-Time Permutation Check](2025-ltpc.pdf)
+  - What we currently reference
+- [Almost Linear-Time Permutation Check](2026-altpc.pdf)
+  - Newer version w/ corrections, slight changes
 - [HyperPlonk](https://eprint.iacr.org/2022/1355), ProdPerm's product check
 
 ### Relevant LTPC sections
@@ -367,6 +370,7 @@ linperm/
     - [ ] Batched openings, then re-run
     - [ ] IPA (log-size openings)
     - [ ] Hiding
+- [ ] Reference "Almost Linear-Time" paper
 - [x] Benchmarks by themselves, w/ HyperPlonk
   - [x] Grand-product baseline (`prodperm`) over Hyrax
 
