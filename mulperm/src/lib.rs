@@ -15,7 +15,8 @@ use alloc::vec::Vec;
 
 use ark_ff::PrimeField;
 use ark_poly::DenseMultilinearExtension;
-use permcore::{Permutation, PolynomialCommitment};
+use permcore::eq::eq_eval_table;
+use permcore::{CoreError, Permutation, PolynomialCommitment};
 
 /// How the $\mu$ bit slots of $\sigma(x)$ split into groups. Slot
 /// $b = j \cdot w + i$ is bit $i \in \[w\]$ of group $j \in [\ell]$.
@@ -66,6 +67,7 @@ pub enum ParamsError {
 #[derive(Debug, PartialEq, Eq)]
 pub enum MulPermError<E> {
     Params(ParamsError),
+    Core(CoreError),
     /// PCS operation produced an error
     Pcs(E),
 }
@@ -73,6 +75,12 @@ pub enum MulPermError<E> {
 impl<E> From<ParamsError> for MulPermError<E> {
     fn from(e: ParamsError) -> Self {
         Self::Params(e)
+    }
+}
+
+impl<E> From<CoreError> for MulPermError<E> {
+    fn from(e: CoreError) -> Self {
+        Self::Core(e)
     }
 }
 
@@ -179,6 +187,54 @@ pub fn index<F: PrimeField, P: PolynomialCommitment<F>>(
     index_with(pk, perm, groups.ell)
 }
 
+/// Algorithm 4: the partial products $p(x, \langle j \rangle) =
+/// \mathrm{eq}(\alpha_{I_j}, \sigma_{I_j}(x))$ of Eq. 6 for every
+/// $x \in B_\mu$ and $j \in [\ell]$, where $I_j$ is group $j$'s $w$ bit
+/// slots. Their product over $j$ is $\mathrm{eq}(\alpha, \sigma(x))$.
+/// Group $j$'s bits take only $2^w$ values, so `eq_eval_table` of
+/// $\alpha_{I_j}$ holds every possible $p(\cdot, \langle j \rangle)$, and
+/// each entry is one lookup by `perm.group`. Cost is $O(\ell \cdot 2^w)$ field
+/// operations (Lemma 5) plus $n \ell$ lookups, instead of the naive $n \mu$
+/// multiplications required to build a table of size $n \dot \ell$.
+///
+/// Takes $\sigma$ as `perm`, its grouping as `groups`, and the challenge
+/// $\alpha \in \mathbb{F}^\mu$ as `alpha`. Returns $\ell$ multilinear
+/// extensions over $\mu$ variables, entry $j$ being $\tilde{p}(\cdot, \langle j \rangle)$.
+/// Laid end to end they are the table of $\tilde{p}$ over $\mu + \log \ell$
+/// variables, $x$ low and $j$ high.
+///
+/// # Panics
+///
+/// Panics if `alpha.len()` or $\ell \cdot w$ isn't $\mu$.
+pub fn partial_products<F: PrimeField>(
+    perm: &Permutation,
+    groups: Groups,
+    alpha: &[F],
+) -> Result<Vec<DenseMultilinearExtension<F>>, CoreError> {
+    let Groups { ell, width } = groups;
+    let num_vars = perm.num_vars();
+    assert_eq!(alpha.len(), num_vars, "α length must be μ");
+    assert_eq!(ell * width, num_vars, "groups must cover μ");
+    (0..ell)
+        .map(|j| {
+            // Covers $j \cdot w$ through $j \cdot w + w − 1$, $I_j$.
+            // Picking out values from $\alpha $ for the decomposition.
+            // The group #, the spread in that group, the group position.
+            // $eq_t[s] = eq(\alpha_{I_j}, s)$ for each of the $2^w$ patterns.
+            let eq_t = eq_eval_table(&alpha[j * width..(j + 1) * width]);
+            let evals = (0..perm.size())
+                // We need every $x$ evaluation for each $j$.
+                // We get the entry from the evaluation based on
+                // the $\ell$, $j$, and $x$ we're interested in.
+                .map(|x| Ok(eq_t[perm.group(ell, j, x)?]))
+                .collect::<Result<Vec<F>, CoreError>>()?;
+            Ok(DenseMultilinearExtension::from_evaluations_vec(
+                num_vars, evals,
+            ))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,6 +242,7 @@ mod tests {
     use ark_ff::UniformRand;
     use ark_poly::Polynomial;
     use ark_std::test_rng;
+    use permcore::eq::eq;
     use permcore::MockPcs;
 
     /// The low `k` bits of `v` as a
@@ -203,6 +260,33 @@ mod tests {
             5, 3, 7, 1, 0, 6, 2, 4, 9, 11, 8, 10, 13, 15, 12, 14
         ])
         .unwrap()
+    }
+
+    /// $\mu = 8$, each $x$ maps to $x + 1$ and $255$
+    /// wraps to $0$. Gives groups of up to 8 bits.
+    fn shift_perm() -> Permutation {
+        Permutation::new((0..256).map(|x| (x + 1) % 256).collect()).unwrap()
+    }
+
+    /// Naive Eq. 6, one bit-wise eq per slot of group $j$, so $w$
+    /// multiplications per entry and $O(n \mu)$ for the whole table.
+    /// We do the naive partial product for an easy correctness check.
+    fn partial_product_naive(
+        perm: &Permutation,
+        width: usize,
+        alpha: &[Fr],
+        j: usize,
+        x: usize,
+    ) -> Fr {
+        // For a single group $j$ which
+        // is what we'll check against
+        (0..width)
+            .map(|i| {
+                let b = j * width + i;
+                let bit = Fr::from(perm.bit(b, x) as u64);
+                eq(&[alpha[b]], &[bit])
+            })
+            .product()
     }
 
     #[test]
@@ -292,6 +376,60 @@ mod tests {
             // `sigma_commit = sigma` because mock uses poly.
             assert_eq!(v_idx.sigma_commit, sigma);
             assert_eq!(v_idx.groups, Groups::new(4, ell).unwrap());
+        }
+    }
+
+    #[test]
+    fn partial_products_match_naive() {
+        let mut rng = test_rng();
+        // Using both for $\mu = 4$ and $\mu = 8$ even though
+        // there isn't much we gain from testing across both.
+        for perm in [sample_perm(), shift_perm()] {
+            let num_vars = perm.num_vars();
+            let alpha: Vec<Fr> =
+                (0..num_vars).map(|_| Fr::rand(&mut rng)).collect();
+            // Different $\ell$s cover the different extremes at each
+            // end. Minimum # of groups up to maximum # of groups.
+            for ell in [1, 2, num_vars] {
+                let groups = Groups::new(num_vars, ell).unwrap();
+                let parts = partial_products(&perm, groups, &alpha).unwrap();
+                assert_eq!(parts.len(), ell);
+                for (j, p) in parts.iter().enumerate() {
+                    assert_eq!(p.num_vars, num_vars);
+                    for x in 0..perm.size() {
+                        let want = partial_product_naive(
+                            &perm,
+                            groups.width,
+                            &alpha,
+                            j,
+                            x,
+                        );
+                        assert_eq!(p.evaluations[x], want);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn partial_products_multiply_to_indicator() {
+        let mut rng = test_rng();
+        for perm in [sample_perm(), shift_perm()] {
+            let num_vars = perm.num_vars();
+            let alpha: Vec<Fr> =
+                (0..num_vars).map(|_| Fr::rand(&mut rng)).collect();
+            for ell in [1, 2, num_vars] {
+                let groups = Groups::new(num_vars, ell).unwrap();
+                let parts = partial_products(&perm, groups, &alpha).unwrap();
+                for x in 0..perm.size() {
+                    let prod: Fr =
+                        parts.iter().map(|p| p.evaluations[x]).product();
+                    // Lemma 4's $\tilde{1}_\sigma(x, \alpha)$
+                    // Basically just an arithmetization check
+                    let want = eq(&alpha, &bits(perm.apply(x), num_vars));
+                    assert_eq!(prod, want);
+                }
+            }
         }
     }
 
