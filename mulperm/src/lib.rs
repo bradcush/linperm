@@ -1101,7 +1101,8 @@ mod tests {
             // $E(a, s) = (1 - a) + s (2a - 1)$, so shifting
             // $\tilde{\sigma}_0$ by $c\, w_1$ at $(x, j) = (0, 0)$
             // and $-c\, w_0$ at $(1, 0)$, $w_x = \mathrm{eq}(\beta',
-            // (x, 0)) (2 \alpha_0 - 1)$, keeps $S_p$.
+            // (x, 0)) (2 \alpha_0 - 1)$, changes $S_p$ by
+            // $c\, w_1 w_0 - c\, w_0 w_1 = 0$.
             let eq_bt = eq_eval_table(&beta_t);
             let w = |x: usize| eq_bt[x] * (alpha[0] + alpha[0] - one);
             // On a forged sigma, almost the same. Using `w` this allows us to

@@ -502,4 +502,81 @@ mod tests {
         let err = verify(&vk, &v_idx, &proof, &mut v_t).unwrap_err();
         assert!(matches!(err, BiPermError::PcsVerifyFailed));
     }
+
+    #[test]
+    // A prover that runs the sumcheck on a different polynomial
+    // with the same hypercube sum passes every round and every
+    // opening, so only the final check can catch it.
+    fn rejects_cheating_sumcheck() {
+        let mut rng = test_rng();
+        let perm = sample_perm();
+        let (f, g) = consistent_pair(&perm, &mut rng);
+        let (pk, vk) = setup_keys(&perm, &mut rng);
+        let (p_idx, v_idx) = index::<Fr, MockPcs<Fr>>(&pk, &perm).unwrap();
+        let num_vars = perm.num_vars();
+        let one = Fr::from(1u64);
+        // An honest proof with the sumcheck redone on a forged $f'$ with the
+        // same hypercube sum, then the real $f$ and indicators opened at
+        // its $r$. $f'$ and $f$ differ at $r$ when $c \ne 0$.
+        let forge = |c: Fr| {
+            let mut proof =
+                prove(&pk, &p_idx, &f, &g, &mut Transcript::new(b"biperm"))
+                    .unwrap();
+            // Replay `prove`'s transcript up to the sumcheck
+            let mut tr = Transcript::new(b"biperm");
+            tr.append(b"ind_l_commit", &p_idx.ind_l_commit);
+            tr.append(b"ind_r_commit", &p_idx.ind_r_commit);
+            tr.append(b"f_commit", &proof.f_commit);
+            tr.append(b"g_commit", &proof.g_commit);
+            let alpha: Vec<Fr> = tr.challenge_vec(b"alpha", num_vars);
+            MockPcs::<Fr>::open(&pk, (&g).into(), &alpha, &mut tr).unwrap();
+            let (alpha_l, alpha_r) = alpha.split_at(num_vars / 2);
+            let h = |half: &[Fr], left: bool| {
+                DenseMultilinearExtension::from_evaluations_vec(
+                    num_vars,
+                    indicator_table(&perm, half, left).unwrap(),
+                )
+            };
+            let (h_l, h_r) = (h(alpha_l, true), h(alpha_r, false));
+            // $f h_L h_R$ is linear in $f$, so shifting $f$ by
+            // $c\, w_1$ at $x = 0$ and $-c\, w_0$ at $x = 1$,
+            // $w_x = h_L(x) h_R(x)$, changes the sum by
+            // $c\, w_1 w_0 - c\, w_0 w_1 = 0$.
+            let w = |x: usize| h_l.evaluations[x] * h_r.evaluations[x];
+            let mut forged = f.clone();
+            forged.evaluations[0] += c * w(1);
+            forged.evaluations[1] -= c * w(0);
+            let out = sumcheck::prove(&[forged, h_l, h_r], &mut tr);
+            let r = &out.challenges;
+            let point_l: Vec<Fr> = r.iter().chain(alpha_l).copied().collect();
+            let point_r: Vec<Fr> = r.iter().chain(alpha_r).copied().collect();
+            (proof.f_at_r, proof.f_opening) =
+                MockPcs::<Fr>::open(&pk, (&f).into(), r, &mut tr).unwrap();
+            (proof.ind_l_at_r, proof.ind_l_opening) = MockPcs::<Fr>::open(
+                &pk,
+                p_idx.ind_l.mle_ref(),
+                &point_l,
+                &mut tr,
+            )
+            .unwrap();
+            (proof.ind_r_at_r, proof.ind_r_opening) = MockPcs::<Fr>::open(
+                &pk,
+                p_idx.ind_r.mle_ref(),
+                &point_r,
+                &mut tr,
+            )
+            .unwrap();
+            proof.sumcheck = out.proof;
+            proof
+        };
+        let check = |proof| {
+            verify(&vk, &v_idx, &proof, &mut Transcript::new(b"biperm"))
+        };
+        // At $c = 0$ the forgery is honest, and replay ok
+        assert!(check(forge(Fr::from(0u64))).is_ok());
+        assert!(matches!(
+            check(forge(one)),
+            Err(BiPermError::FinalCheckFailed)
+        ));
+    }
 }
