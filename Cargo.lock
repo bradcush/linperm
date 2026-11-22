@@ -765,6 +765,7 @@ dependencies = [
  "ark-ff",
  "ark-poly",
  "ark-std",
+ "hyrax",
  "permcore",
 ]
 

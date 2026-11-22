@@ -15,8 +15,10 @@ use alloc::vec::Vec;
 
 use ark_ff::PrimeField;
 use ark_poly::{DenseMultilinearExtension, Polynomial};
-use permcore::eq::eq_eval_table;
-use permcore::sumcheck::{self, SumcheckProof, SumcheckProverOutput};
+use permcore::eq::{eq, eq_eval_table};
+use permcore::sumcheck::{
+    self, SumcheckError, SumcheckProof, SumcheckProverOutput,
+};
 use permcore::{CoreError, Permutation, PolynomialCommitment, Transcript};
 
 /// How the $\mu$ bit slots of $\sigma(x)$ split into groups. Slot
@@ -71,6 +73,21 @@ pub enum MulPermError<E> {
     Core(CoreError),
     /// PCS operation produced an error
     Pcs(E),
+    /// A PCS opening didn't verify
+    /// against its commitment
+    PcsVerifyFailed,
+    /// The proof has the wrong number of
+    /// $v_j$ or $\tilde{\sigma}$ openings
+    MalformedProof,
+    /// Sumcheck 1's rounds
+    Sumcheck1(SumcheckError),
+    /// $C_1 \ne f(\beta) \prod_j v_j$
+    C1Failed,
+    /// Sumcheck 2's rounds
+    Sumcheck2(SumcheckError),
+    /// $C_2 \ne \mathrm{eq}(\beta', \gamma) \prod_i
+    /// E(\tilde{\alpha}(\langle i \rangle, j^*), V_i)$
+    C2Failed,
 }
 
 impl<E> From<ParamsError> for MulPermError<E> {
@@ -107,6 +124,24 @@ pub struct MulPermVerifierIndex<F: PrimeField, P: PolynomialCommitment<F>> {
 /// the prover and verifier halves.
 pub type MulPermIndex<F, P> =
     (MulPermProverIndex<F, P>, MulPermVerifierIndex<F, P>);
+
+/// Perm proof: PCS commitments to $f, g$, both sumchecks' messages, the
+/// $v_j = \tilde{p}(\beta, \langle j \rangle)$, and PCS openings of $g$ at
+/// $\alpha$, $f$ at $\beta$, and $\tilde{\sigma}$ at $(\langle i \rangle,
+/// j^*, x^*)$ for each $i \in [w]$, where $\gamma = (x^*, j^*)$.
+pub struct MulPermProof<F: PrimeField, P: PolynomialCommitment<F>> {
+    pub f_commit: P::Commitment,
+    pub g_commit: P::Commitment,
+    pub g_at_alpha: F,
+    pub g_opening: P::Proof,
+    pub sumcheck1: SumcheckProof<F>,
+    pub f_at_beta: F,
+    pub f_opening: P::Proof,
+    pub p_at_beta: Vec<F>,
+    pub sumcheck2: SumcheckProof<F>,
+    pub sigma_at_gamma: Vec<F>,
+    pub sigma_openings: Vec<P::Proof>,
+}
 
 /// The paper's $\tilde{\sigma}[\mu]$ over $\log \mu + \mu$ variables, with
 /// $\tilde{\sigma}(\langle b \rangle, x) = \sigma_b(x)$, the $b$-th bit of
@@ -401,14 +436,251 @@ fn fold<F: PrimeField>(table: &mut Vec<F>, r: F) {
     table.truncate(half);
 }
 
+/// The $w$ points $(\langle i \rangle, j^*, x^*)$ where
+/// $\tilde{\sigma}$ is opened after sumcheck 2, one per bit
+/// $i$ of a group. Takes the grouping as `groups` and
+/// sumcheck 2's challenges $\gamma = (x^*, j^*)$ as
+/// `gamma`. Returns the points in order of $i$.
+fn sigma_points<F: PrimeField>(groups: Groups, gamma: &[F]) -> Vec<Vec<F>> {
+    let Groups { ell, width } = groups;
+    let log_w = width.trailing_zeros() as usize;
+    let (x_star, j_star) = gamma.split_at(ell * width);
+    (0..width)
+        .map(|i| {
+            // `i` is bit position, we're
+            // representing that in binary
+            (0..log_w)
+                .map(|k| F::from(((i >> k) & 1) as u64))
+                .chain(j_star.iter().copied())
+                .chain(x_star.iter().copied())
+                .collect()
+        })
+        .collect()
+}
+
+/// Verify one PCS opening, turning a rejection into an error. Takes the
+/// verifier key `vk`, the `commitment`, the `point`, the claimed `value`,
+/// its `proof` and the Fiat–Shamir `transcript`. Returns `Ok(())` if
+/// the opening verifies, [`MulPermError::PcsVerifyFailed`] otherwise.
+fn check_opening<F: PrimeField, P: PolynomialCommitment<F>>(
+    vk: &P::VerifierKey,
+    commitment: &P::Commitment,
+    point: &[F],
+    value: F,
+    proof: &P::Proof,
+    transcript: &mut Transcript,
+) -> Result<(), MulPermError<P::Error>> {
+    if P::verify(vk, commitment, point, value, proof, transcript)
+        .map_err(MulPermError::Pcs)?
+    {
+        Ok(())
+    } else {
+        // `Ok(false)`, the PCS verify ran
+        Err(MulPermError::PcsVerifyFailed)
+    }
+}
+
+/// Algorithm 3's prover. Commits to $f, g$ and absorbs every commitment
+/// before squeezing $\alpha$. Opens $g$ at $\alpha$, runs sumcheck 1 to get
+/// $\beta$ and the $v_j$, opens $f$ at $\beta$, then absorbs the $v_j$ before
+/// squeezing $t$, so $\beta' = (\beta, t)$ depends on them. Sumcheck 2 proves
+/// the $v_j$ and ends at $\gamma$, where $\tilde{\sigma}$ is opened $w$ times.
+///
+/// Takes the PCS prover key `pk`, the prover half of the [`index`],
+/// $f$ and $g$ as `f` and `g`, and the Fiat–Shamir `transcript`.
+/// Returns the proof, or an error if a PCS operation fails.
+///
+/// # Panics
+///
+/// Panics if `f` or `g` isn't over $\mu$ variables.
+pub fn prove<F: PrimeField, P: PolynomialCommitment<F>>(
+    pk: &P::ProverKey,
+    index: &MulPermProverIndex<F, P>,
+    f: &DenseMultilinearExtension<F>,
+    g: &DenseMultilinearExtension<F>,
+    transcript: &mut Transcript,
+) -> Result<MulPermProof<F, P>, MulPermError<P::Error>> {
+    // All `num_vars` are the same across polys
+    let num_vars = index.perm.num_vars();
+    assert_eq!(num_vars, f.num_vars, "f num_vars must match μ");
+    assert_eq!(num_vars, g.num_vars, "g num_vars must match μ");
+    let groups = index.groups;
+    let f_commit = P::commit(pk, f.into()).map_err(MulPermError::Pcs)?;
+    let g_commit = P::commit(pk, g.into()).map_err(MulPermError::Pcs)?;
+    // Remember, we absorb all public messages, everything the
+    // prover could potentially pick needs to be used to
+    // compute a challenge so there is no freedom.
+    transcript.append(b"sigma_commit", &index.sigma_commit);
+    transcript.append(b"f_commit", &f_commit);
+    transcript.append(b"g_commit", &g_commit);
+    let alpha: Vec<F> = transcript.challenge_vec(b"alpha", num_vars);
+    let (g_at_alpha, g_opening) =
+        P::open(pk, g.into(), &alpha, transcript).map_err(MulPermError::Pcs)?;
+    let parts = partial_products(&index.perm, groups, &alpha)?;
+    let (out1, p_at_beta) = sumcheck1_prove(f, parts, transcript);
+    // Mapping to what we call $\beta$
+    let beta = out1.challenges;
+    let (f_at_beta, f_opening) =
+        P::open(pk, f.into(), &beta, transcript).map_err(MulPermError::Pcs)?;
+    transcript.append_slice(b"p_at_beta", &p_at_beta);
+    let log_ell = groups.ell.trailing_zeros() as usize;
+    let t: Vec<F> = transcript.challenge_vec(b"t", log_ell);
+    let beta_t = [beta, t].concat();
+    let out2 =
+        sumcheck2_prove(&index.sigma, groups, &alpha, &beta_t, transcript);
+    let (sigma_at_gamma, sigma_openings) =
+        sigma_points(groups, &out2.challenges)
+            .iter()
+            // Each point to evaluation/proof pairs that we need later
+            .map(|point| P::open(pk, (&index.sigma).into(), point, transcript))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(MulPermError::Pcs)?
+            .into_iter()
+            .unzip();
+    Ok(MulPermProof {
+        f_commit,
+        g_commit,
+        g_at_alpha,
+        g_opening,
+        sumcheck1: out1.proof,
+        f_at_beta,
+        f_opening,
+        p_at_beta,
+        sumcheck2: out2.proof,
+        sigma_at_gamma,
+        sigma_openings,
+    })
+}
+
+/// Algorithm 3's verifier. Checks the $g$ opening, sumcheck 1 against
+/// $g(\alpha)$ at degree $\ell + 1$, the $f$ opening and $C_1$. Then
+/// sumcheck 2 against $S_p = \sum_j \mathrm{eq}(t, \langle j \rangle) v_j$
+/// at degree $2w + 1$, the $w$ $\tilde{\sigma}$ openings $V_i$ and $C_2$.
+/// The verifier computes $\tilde{\alpha}(\langle i \rangle, j^*) =
+/// \sum_j \mathrm{eq}(j^*, \langle j \rangle) \alpha_{j w + i}$
+/// itself, $O(\ell)$ per $i$ and $O(\mu)$ in total.
+///
+/// Takes the PCS verifier key `vk`, the verifier half of the [`index`],
+/// the `proof` and the Fiat–Shamir `transcript`. Returns `Ok(())` if the
+/// proof verifies, or the first check that failed.
+pub fn verify<F: PrimeField, P: PolynomialCommitment<F>>(
+    vk: &P::VerifierKey,
+    index: &MulPermVerifierIndex<F, P>,
+    proof: &MulPermProof<F, P>,
+    transcript: &mut Transcript,
+) -> Result<(), MulPermError<P::Error>> {
+    let num_vars = index.num_vars;
+    let groups = index.groups;
+    let Groups { ell, width } = groups;
+    if proof.p_at_beta.len() != ell
+        || proof.sigma_at_gamma.len() != width
+        || proof.sigma_openings.len() != width
+    {
+        return Err(MulPermError::MalformedProof);
+    }
+    // Just like the prover, before squeezing $\alpha$
+    transcript.append(b"sigma_commit", &index.sigma_commit);
+    transcript.append(b"f_commit", &proof.f_commit);
+    transcript.append(b"g_commit", &proof.g_commit);
+    let alpha: Vec<F> = transcript.challenge_vec(b"alpha", num_vars);
+    check_opening::<F, P>(
+        vk,
+        &proof.g_commit,
+        &alpha,
+        proof.g_at_alpha,
+        &proof.g_opening,
+        transcript,
+    )?;
+    let out1 = sumcheck::verify(
+        proof.g_at_alpha,
+        num_vars,
+        // Because $v$s and $f$
+        ell + 1,
+        &proof.sumcheck1,
+        transcript,
+    )
+    .map_err(MulPermError::Sumcheck1)?;
+    let beta = out1.challenges;
+    check_opening::<F, P>(
+        vk,
+        &proof.f_commit,
+        &beta,
+        proof.f_at_beta,
+        &proof.f_opening,
+        transcript,
+    )?;
+    // $C_1 = f(\beta) \prod_j v_j$, final claim 1
+    if proof.f_at_beta * proof.p_at_beta.iter().product::<F>()
+        != out1.final_claim
+    {
+        return Err(MulPermError::C1Failed);
+    }
+    transcript.append_slice(b"p_at_beta", &proof.p_at_beta);
+    let log_ell = ell.trailing_zeros() as usize;
+    let t: Vec<F> = transcript.challenge_vec(b"t", log_ell);
+    // $S_p = \tilde{p}(\beta, t)$, interpolating the $v_j$ in $j$
+    // The claimed sum for sumcheck 2, folds the $\ell$ claims
+    let s_p: F = eq_eval_table(&t)
+        .iter()
+        .zip(&proof.p_at_beta)
+        .map(|(e, v)| *e * v)
+        .sum();
+    // $\mu + \log \ell$ entries
+    let beta_t = [beta, t].concat();
+    let out2 = sumcheck::verify(
+        s_p,
+        num_vars + log_ell,
+        2 * width + 1,
+        &proof.sumcheck2,
+        transcript,
+    )
+    .map_err(MulPermError::Sumcheck2)?;
+    // $\gamma$ is the random point Sumcheck 2 ends at. Remember
+    // we narrow at each round, so  one challeng per round,
+    // where at the end we get the entirety of $\gamma$.
+    let gamma = out2.challenges;
+    // Nested pairs, because we zip twice
+    for ((point, &value), opening) in sigma_points(groups, &gamma)
+        .iter()
+        .zip(&proof.sigma_at_gamma)
+        .zip(&proof.sigma_openings)
+    {
+        check_opening::<F, P>(
+            vk,
+            &index.sigma_commit,
+            point,
+            value,
+            opening,
+            transcript,
+        )?;
+    }
+    let eq_j = eq_eval_table(&gamma[num_vars..]);
+    let prod: F = proof
+        .sigma_at_gamma
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let a: F = (0..ell).map(|j| eq_j[j] * alpha[j * width + i]).sum();
+            // $E(a, s)$ is the one-variable eq
+            eq(&[a], &[v])
+        })
+        .product();
+    // $C_2 = \mathrm{eq}(\beta', \gamma) \prod_i
+    // E(\tilde{\alpha}(\langle i \rangle, j^*), V_i)$
+    // This is the second, and final sumcheck claim.
+    if eq(&beta_t, &gamma) * prod != out2.final_claim {
+        return Err(MulPermError::C2Failed);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ark_bn254::Fr;
-    use ark_ff::UniformRand;
+    use ark_ff::{Field, UniformRand};
     use ark_std::test_rng;
-    use permcore::eq::eq;
-    use permcore::sumcheck::SumcheckError;
+    use core::convert::Infallible;
     use permcore::MockPcs;
 
     /// The low `k` bits of `v` as a
@@ -473,55 +745,6 @@ mod tests {
             DenseMultilinearExtension::from_evaluations_vec(num_vars, f_evals),
             DenseMultilinearExtension::from_evaluations_vec(num_vars, g_evals),
         )
-    }
-
-    /// Prover side of sumcheck 1 at a random $\alpha$. Returns
-    /// the claim $g(\alpha)$, which the verifier gets from
-    /// $g$'s opening, the sumcheck output, and the $v_j$.
-    /// Working at the PIOP level, just evaluate $g$.
-    fn run_sumcheck1(
-        perm: &Permutation,
-        ell: usize,
-        f: &DenseMultilinearExtension<Fr>,
-        g: &DenseMultilinearExtension<Fr>,
-        rng: &mut impl ark_std::rand::RngCore,
-    ) -> (Fr, SumcheckProverOutput<Fr>, Vec<Fr>) {
-        let num_vars = perm.num_vars();
-        let alpha: Vec<Fr> = (0..num_vars).map(|_| Fr::rand(rng)).collect();
-        let groups = Groups::new(num_vars, ell).unwrap();
-        let parts = partial_products(perm, groups, &alpha).unwrap();
-        let mut p_t = Transcript::new(b"mulperm");
-        let (out, v) = sumcheck1_prove(f, parts, &mut p_t);
-        (g.evaluate(&alpha), out, v)
-    }
-
-    /// The final check $C_2 = \mathrm{eq}(\beta', \gamma) \prod_i
-    /// E(\tilde{\alpha}(\langle i \rangle, j^*), \tilde{\sigma}(\langle i
-    /// \rangle, j^*, x^*))$ at $\gamma = (x^*, j^*)$, with $\tilde{\sigma}$
-    /// evaluated directly in place of its $w$ openings.
-    fn c2(
-        sigma: &DenseMultilinearExtension<Fr>,
-        groups: Groups,
-        alpha: &[Fr],
-        beta_t: &[Fr],
-        // $\gamma$ is the random
-        // point Sumcheck 2 ends at
-        gamma: &[Fr],
-    ) -> Fr {
-        let log_w = groups.width.trailing_zeros() as usize;
-        let (x_star, j_star) = gamma.split_at(alpha.len());
-        let alpha_t = alpha_mle(alpha);
-        let prod: Fr = (0..groups.width)
-            .map(|i| {
-                let i_j: Vec<Fr> =
-                    bits(i, log_w).into_iter().chain(j_star.to_vec()).collect();
-                let i_j_x: Vec<Fr> =
-                    i_j.iter().chain(x_star).copied().collect();
-                // $E(a, s)$ is the one-variable eq mentioned
-                eq(&[alpha_t.evaluate(&i_j)], &[sigma.evaluate(&i_j_x)])
-            })
-            .product();
-        eq(beta_t, gamma) * prod
     }
 
     #[test]
@@ -679,106 +902,238 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn sumcheck1_round_trip() {
-        let mut rng = test_rng();
-        for perm in [sample_perm(), shift_perm()] {
-            let num_vars = perm.num_vars();
-            let (f, g) = consistent_pair(&perm, &mut rng);
-            for ell in [1, 2, num_vars] {
-                let (claim, out, v) =
-                    run_sumcheck1(&perm, ell, &f, &g, &mut rng);
-                assert_eq!(v.len(), ell);
-                let mut v_t = Transcript::new(b"mulperm");
-                let res = sumcheck::verify(
-                    claim,
-                    num_vars,
-                    // Because $f$ and $v$s
-                    ell + 1,
-                    &out.proof,
-                    &mut v_t,
-                )
-                .unwrap();
-                // Both challenges output on each side because we
-                // need them to prove/verify sumcheck2 later.
-                assert_eq!(res.challenges, out.challenges);
-                // $C_1 = f(\beta) \prod_j v_j$
-                let c1 = f.evaluate(&res.challenges) * v.iter().product::<Fr>();
-                assert_eq!(res.final_claim, c1);
-            }
-        }
-    }
-
-    #[test]
-    fn sumcheck1_rejects_inconsistent_pair() {
-        let mut rng = test_rng();
-        let perm = shift_perm();
-        let ell = 2;
-        let (f, _g_good) = consistent_pair(&perm, &mut rng);
-        // Random $g$ unrelated to $f$ and $\sigma$.
-        let g_bad = DenseMultilinearExtension::from_evaluations_vec(
-            perm.num_vars(),
-            (0..perm.size()).map(|_| Fr::rand(&mut rng)).collect(),
-        );
-        let (claim, out, _) = run_sumcheck1(&perm, ell, &f, &g_bad, &mut rng);
-        // The honest round 0 sums to the true $\sum_x f(x) \cdot
-        // eq(\alpha, \sigma(x))$, which isn't `g_bad`'s $g(\alpha)$.
+    /// Prove $(f, g)$ against `perm`'s index at `ell` on
+    /// MockPcs, apply `tamper` to the proof, then verify against
+    /// `v_perm`'s index. Returns the verifier's result. This
+    /// helper provides flexibility for different test cases.
+    fn prove_then_verify(
+        perm: &Permutation,
+        // Swaps to test tampering
+        v_perm: &Permutation,
+        ell: usize,
+        f: &DenseMultilinearExtension<Fr>,
+        g: &DenseMultilinearExtension<Fr>,
+        tamper: impl FnOnce(&mut MulPermProof<Fr, MockPcs<Fr>>),
+    ) -> Result<(), MulPermError<Infallible>> {
+        let (p_idx, _) = index_with::<Fr, MockPcs<Fr>>(&(), perm, ell).unwrap();
+        let (_, v_idx) =
+            index_with::<Fr, MockPcs<Fr>>(&(), v_perm, ell).unwrap();
+        let mut p_t = Transcript::new(b"mulperm");
+        let mut proof = prove(&(), &p_idx, f, g, &mut p_t).unwrap();
+        // Can also be a noop,
+        // for non-tampered calls
+        tamper(&mut proof);
         let mut v_t = Transcript::new(b"mulperm");
-        assert_eq!(
-            sumcheck::verify(
-                claim,
-                perm.num_vars(),
-                ell + 1,
-                &out.proof,
-                &mut v_t
-            ),
-            Err(SumcheckError::RoundCheckFailed { round: 0 })
-        );
+        verify(&(), &v_idx, &proof, &mut v_t)
+    }
+
+    /// [`prove_then_verify`] on a consistent pair, with the same
+    /// `perm` on both sides, so only `tamper` can make it fail.
+    fn consistent_round_trip(
+        perm: &Permutation,
+        ell: usize,
+        tamper: impl FnOnce(&mut MulPermProof<Fr, MockPcs<Fr>>),
+    ) -> Result<(), MulPermError<Infallible>> {
+        let (f, g) = consistent_pair(perm, &mut test_rng());
+        prove_then_verify(perm, perm, ell, &f, &g, tamper)
     }
 
     #[test]
-    fn sumcheck2_round_trip() {
-        let mut rng = test_rng();
+    fn honest_round_trip() {
         for (perm, ells) in [
             // Turning both into slices
             // gives the same type `&[usize]`.
             (sample_perm(), &[1, 2, 4][..]),
             (shift_perm(), &[1, 2, 4, 8][..]),
         ] {
-            let num_vars = perm.num_vars();
-            let sigma = sigma_mle::<Fr>(&perm);
-            let alpha: Vec<Fr> =
-                (0..num_vars).map(|_| Fr::rand(&mut rng)).collect();
             for &ell in ells {
-                let groups = Groups::new(num_vars, ell).unwrap();
-                let total_vars = num_vars + ell.trailing_zeros() as usize;
-                let beta_t: Vec<Fr> =
-                    (0..total_vars).map(|_| Fr::rand(&mut rng)).collect();
-                // The claim $S_p = \tilde{p}(\beta')$ comes from Alg. 4's
-                // tables laid end to end, independent of $\tilde{\sigma}$.
-                let parts = partial_products(&perm, groups, &alpha).unwrap();
-                let p = DenseMultilinearExtension::from_evaluations_vec(
-                    total_vars,
-                    parts.iter().flat_map(|p| p.evaluations.clone()).collect(),
-                );
-                // $\mu + \log \ell$ entries
-                let claim = p.evaluate(&beta_t);
-                let mut p_t = Transcript::new(b"mulperm");
-                let out =
-                    sumcheck2_prove(&sigma, groups, &alpha, &beta_t, &mut p_t);
-                let mut v_t = Transcript::new(b"mulperm");
-                let res = sumcheck::verify(
-                    claim,
-                    total_vars,
-                    2 * groups.width + 1,
-                    &out.proof,
-                    &mut v_t,
-                )
-                .unwrap();
-                assert_eq!(res.challenges, out.challenges);
-                let want = c2(&sigma, groups, &alpha, &beta_t, &res.challenges);
-                assert_eq!(res.final_claim, want);
+                assert_eq!(consistent_round_trip(&perm, ell, |_| {}), Ok(()));
             }
         }
+    }
+
+    #[test]
+    fn rejects_inconsistent_pair() {
+        let mut rng = test_rng();
+        let perm = sample_perm();
+        let (f, _g_good) = consistent_pair(&perm, &mut rng);
+        // Random $g$ unrelated to $f$ and $\sigma$.
+        let g_bad = DenseMultilinearExtension::from_evaluations_vec(
+            perm.num_vars(),
+            (0..perm.size()).map(|_| Fr::rand(&mut rng)).collect(),
+        );
+        // The honest round 0 sums to the true $\sum_x f(x) \cdot
+        // eq(\alpha, \sigma(x))$, which isn't `g_bad`'s $g(\alpha)$.
+        assert_eq!(
+            prove_then_verify(&perm, &perm, 2, &f, &g_bad, |_| {}),
+            Err(MulPermError::Sumcheck1(SumcheckError::RoundCheckFailed {
+                round: 0
+            }))
+        );
+    }
+
+    #[test]
+    // Tamper (minimal) a single round polynomial of each sumcheck w/
+    // a single field element change, for a single case of $\ell = 2$.
+    fn rejects_tampered_sumcheck() {
+        let perm = sample_perm();
+        assert_eq!(
+            consistent_round_trip(&perm, 2, |p| {
+                p.sumcheck1.round_polys[1][0] += Fr::from(1)
+            }),
+            Err(MulPermError::Sumcheck1(SumcheckError::RoundCheckFailed {
+                round: 1
+            }))
+        );
+        assert_eq!(
+            consistent_round_trip(&perm, 2, |p| {
+                p.sumcheck2.round_polys[1][0] += Fr::from(1)
+            }),
+            Err(MulPermError::Sumcheck2(SumcheckError::RoundCheckFailed {
+                round: 1
+            }))
+        );
+    }
+
+    #[test]
+    fn rejects_mismatched_index() {
+        // $\tilde{\sigma}$'s commitment is absorbed into the transcript, so
+        // a verifier holding a different $\sigma$'s index derives a
+        // different $\alpha$ and the $g$-opening check fails immediately.
+        let mut rng = test_rng();
+        let perm = sample_perm();
+        let (f, g) = consistent_pair(&perm, &mut rng);
+        let other_perm = Permutation::identity(perm.num_vars());
+        assert_eq!(
+            prove_then_verify(&perm, &other_perm, 2, &f, &g, |_| {}),
+            Err(MulPermError::PcsVerifyFailed)
+        );
+    }
+
+    #[test]
+    // A forged $\tilde{\sigma}$ value must fail against the
+    // preprocessed commitment, not be taken on faith.
+    fn rejects_tampered_sigma_opening() {
+        assert_eq!(
+            consistent_round_trip(&sample_perm(), 2, |p| {
+                p.sigma_at_gamma[0] += Fr::from(1)
+            }),
+            Err(MulPermError::PcsVerifyFailed)
+        );
+    }
+
+    #[test]
+    fn rejects_forged_p_at_beta() {
+        let perm = sample_perm();
+        // Changing the product of the $v_j$ breaks $C_1$
+        assert_eq!(
+            consistent_round_trip(&perm, 2, |p| p.p_at_beta[0] += Fr::from(1)),
+            Err(MulPermError::C1Failed)
+        );
+        // $(v_0 c, v_1 / c)$ keeps the product, so $C_1$ passes, but
+        // $t$ and $S_p$ change, so sumcheck 2 fails at round 0.
+        let c = Fr::from(3);
+        assert_eq!(
+            consistent_round_trip(&perm, 2, |p| {
+                p.p_at_beta[0] *= c;
+                p.p_at_beta[1] *= c.inverse().unwrap();
+            }),
+            Err(MulPermError::Sumcheck2(SumcheckError::RoundCheckFailed {
+                round: 0
+            }))
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_proof() {
+        let perm = sample_perm();
+        assert_eq!(
+            consistent_round_trip(&perm, 2, |p| {
+                p.p_at_beta.pop();
+            }),
+            Err(MulPermError::MalformedProof)
+        );
+        assert_eq!(
+            consistent_round_trip(&perm, 2, |p| {
+                p.sigma_openings.pop();
+            }),
+            Err(MulPermError::MalformedProof)
+        );
+    }
+
+    #[test]
+    // A prover that runs sumcheck 2 on a different polynomial with the
+    // same hypercube sum passes every round and every opening, so only
+    // $C_2$ can catch it. $\ell = \mu$ makes $w = 1$, so the summand
+    // $\mathrm{eq} \cdot E(\tilde{\alpha}_0, \tilde{\sigma}_0)$
+    // has a single $E$, linear in $\tilde{\sigma}_0$.
+    fn rejects_cheating_sumcheck2() {
+        let mut rng = test_rng();
+        let perm = sample_perm();
+        let (f, g) = consistent_pair(&perm, &mut rng);
+        let num_vars = perm.num_vars();
+        let ell = num_vars;
+        let (p_idx, v_idx) =
+            index_with::<Fr, MockPcs<Fr>>(&(), &perm, ell).unwrap();
+        let sigma = &p_idx.sigma;
+        let one = Fr::from(1);
+        // An honest proof with sumcheck 2 redone on a forged $\tilde{\sigma}'$
+        // with the same $S_p$, then the real $\tilde{\sigma}$ opened at its
+        // $\gamma$. The two differ at $\gamma$ when $c \ne 0$.
+        let forge = |c: Fr| {
+            let mut proof =
+                prove(&(), &p_idx, &f, &g, &mut Transcript::new(b"mulperm"))
+                    .unwrap();
+            // Replay `prove`'s transcript up to sumcheck 2
+            let mut tr = Transcript::new(b"mulperm");
+            tr.append(b"sigma_commit", &p_idx.sigma_commit);
+            tr.append(b"f_commit", &proof.f_commit);
+            tr.append(b"g_commit", &proof.g_commit);
+            let alpha: Vec<Fr> = tr.challenge_vec(b"alpha", num_vars);
+            MockPcs::<Fr>::open(&(), (&g).into(), &alpha, &mut tr).unwrap();
+            let parts = partial_products(&perm, p_idx.groups, &alpha).unwrap();
+            let beta = sumcheck1_prove(&f, parts, &mut tr).0.challenges;
+            MockPcs::<Fr>::open(&(), (&f).into(), &beta, &mut tr).unwrap();
+            tr.append_slice(b"p_at_beta", &proof.p_at_beta);
+            let log_ell = ell.trailing_zeros() as usize;
+            let t: Vec<Fr> = tr.challenge_vec(b"t", log_ell);
+            let beta_t = [beta, t].concat();
+            // $E(a, s) = (1 - a) + s (2a - 1)$, so shifting
+            // $\tilde{\sigma}_0$ by $c\, w_1$ at $(x, j) = (0, 0)$
+            // and $-c\, w_0$ at $(1, 0)$, $w_x = \mathrm{eq}(\beta',
+            // (x, 0)) (2 \alpha_0 - 1)$, keeps $S_p$.
+            let eq_bt = eq_eval_table(&beta_t);
+            let w = |x: usize| eq_bt[x] * (alpha[0] + alpha[0] - one);
+            // On a forged sigma, almost the same. Using `w` this allows us to
+            // keep the sum the same but $\sigma$ and $\sigma'$ still differ.
+            let mut forged = sigma.clone();
+            forged.evaluations[0] += c * w(1);
+            forged.evaluations[num_vars] -= c * w(0);
+            let out = sumcheck2_prove(
+                &forged,
+                p_idx.groups,
+                &alpha,
+                &beta_t,
+                &mut tr,
+            );
+            let (values, openings): (Vec<Fr>, Vec<()>) =
+                sigma_points(p_idx.groups, &out.challenges)
+                    .iter()
+                    .map(|pt| {
+                        MockPcs::<Fr>::open(&(), sigma.into(), pt, &mut tr)
+                            .unwrap()
+                    })
+                    .unzip();
+            proof.sumcheck2 = out.proof;
+            proof.sigma_at_gamma = values;
+            proof.sigma_openings = openings;
+            proof
+        };
+        let check = |proof| {
+            verify(&(), &v_idx, &proof, &mut Transcript::new(b"mulperm"))
+        };
+        // At $c = 0$ the forgery is honest, and replay ok
+        assert_eq!(check(forge(Fr::from(0))), Ok(()));
+        assert_eq!(check(forge(one)), Err(MulPermError::C2Failed));
     }
 }
