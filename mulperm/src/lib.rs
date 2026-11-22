@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 use ark_ff::PrimeField;
 use ark_poly::{DenseMultilinearExtension, Polynomial};
 use permcore::eq::eq_eval_table;
-use permcore::sumcheck::{self, SumcheckProverOutput};
+use permcore::sumcheck::{self, SumcheckProof, SumcheckProverOutput};
 use permcore::{CoreError, Permutation, PolynomialCommitment, Transcript};
 
 /// How the $\mu$ bit slots of $\sigma(x)$ split into groups. Slot
@@ -264,6 +264,143 @@ pub fn sumcheck1_prove<F: PrimeField>(
     (output, p_at_beta)
 }
 
+/// Algorithm 7's prover, by direct computation in every
+/// round, with no bucketing yet. Sumcheck 2 proves Eq. 9,
+/// $\sum_{x, j} \mathrm{eq}(\beta', (x, j)) \prod_i E(\tilde{\alpha}_i,
+/// \tilde{\sigma}_i) = \tilde{p}(\beta')$, with $\tilde{\alpha}_i =
+/// \tilde{\alpha}(\langle i \rangle, j)$, $\tilde{\sigma}_i =
+/// \tilde{\sigma}(\langle i \rangle, j, x)$ and $E(a, s) = a s + (1 - a)(1 -
+/// s)$, Definition 2's $\mathrm{eq}$ for one variable. Variables are $x$
+/// low and $j$ high, so the $\mu$ rounds over $x$ come first. Each $E$ has
+/// degree 2 in $j$, so the degree is $2w + 1$ in every round.
+///
+/// Each round evaluates the summand at $c = 0, \ldots, 2w + 1$
+/// directly, $O(w)$ per point and table pair, so $O(n \mu w)$ over
+/// all rounds. $\tilde{\alpha}_i$ doesn't depend on $x$, so it's
+/// kept as $\ell$ values and only folds in the $j$ rounds.
+///
+/// Takes the index's $\tilde{\sigma}$ as `sigma`, its grouping as `groups`,
+/// $\alpha$ as `alpha`, $\beta' = (\beta, t)$ as `beta_t` and the
+/// Fiat–Shamir `transcript`. Returns the sumcheck output, whose challenges
+/// are $\gamma = (x^*, j^*)$. Transcript labels match [`sumcheck::prove`],
+/// so [`sumcheck::verify`] checks the proof at degree $2w + 1$.
+///
+/// # Panics
+///
+/// Panics if `alpha.len()` isn't $\ell \cdot w$, `sigma` isn't over
+/// $\log \mu + \mu$ variables, or `beta_t` isn't over $\mu + \log \ell$.
+pub fn sumcheck2_prove<F: PrimeField>(
+    sigma: &DenseMultilinearExtension<F>,
+    groups: Groups,
+    alpha: &[F],
+    // $\beta$ w/ $t$ appended, $\mu + \log \ell$ field elements,
+    // sumcheck 1's challenge point and a random point in $J$ variables
+    beta_t: &[F],
+    transcript: &mut Transcript,
+) -> SumcheckProverOutput<F> {
+    let Groups { ell, width } = groups;
+    let num_vars = alpha.len();
+    let n = 1 << num_vars;
+    let total = num_vars + ell.trailing_zeros() as usize;
+    assert_eq!(ell * width, num_vars, "groups must cover μ");
+    // Because one entry per (bit slot $b$, input $x$)
+    assert_eq!(sigma.evaluations.len(), num_vars * n, "σ̃ size");
+    assert_eq!(beta_t.len(), total, "β′ must have μ + log ℓ entries");
+    let degree = 2 * width + 1;
+    let mut eq_t = eq_eval_table(beta_t);
+    // $\tilde{\sigma}_i$ at entry $x + n \cdot j$ is $\tilde{\sigma}$'s
+    // entry $(j \cdot w + i) + \mu \cdot x$, moving $x$ to the low end.
+    // Just a reshuffle of $\tilde{\sigma}$, to use in the prover
+    let mut s: Vec<Vec<F>> = (0..width)
+        .map(|i| {
+            (0..ell)
+                .flat_map(|j| {
+                    (0..n).map(move |x| {
+                        sigma.evaluations[j * width + i + num_vars * x]
+                    })
+                })
+                .collect()
+        })
+        .collect();
+    let mut a: Vec<Vec<F>> = (0..width)
+        .map(|i| (0..ell).map(|j| alpha[j * width + i]).collect())
+        .collect();
+    // Size of the $x$ part of each
+    // table, 1 once $x$ is bound
+    let mut x_len = n;
+    let mut round_polys = Vec::with_capacity(total);
+    let mut challenges = Vec::with_capacity(total);
+    // Each factor's value at the current $c$, and its step to $c + 1$
+    let mut a_c = alloc::vec![F::zero(); width];
+    let mut a_step = alloc::vec![F::zero(); width];
+    let mut s_c = alloc::vec![F::zero(); width];
+    let mut s_step = alloc::vec![F::zero(); width];
+    // For each round we update the transcript, add the
+    // round poly (as evals), and push the challenges.
+    for _ in 0..total {
+        let half = eq_t.len() / 2;
+        let mut evals = alloc::vec![F::zero(); degree + 1];
+        for y in 0..half {
+            for i in 0..width {
+                s_c[i] = s[i][2 * y];
+                s_step[i] = s[i][2 * y + 1] - s_c[i];
+                // In an $x$ round both entries of the pair share
+                // $j = y / (x_{len} / 2)$, so $\tilde{\alpha}_i$ is constant.
+                (a_c[i], a_step[i]) = if x_len > 1 {
+                    (a[i][y / (x_len / 2)], F::zero())
+                } else {
+                    (a[i][2 * y], a[i][2 * y + 1] - a[i][2 * y])
+                };
+            }
+            let mut e_c = eq_t[2 * y];
+            let e_step = eq_t[2 * y + 1] - e_c;
+            for eval in evals.iter_mut() {
+                let mut prod = e_c;
+                for i in 0..width {
+                    // $E(a, s) = 1 - a - s + 2as$, one multiplication
+                    let t = a_c[i] * s_c[i];
+                    prod *= F::one() - a_c[i] - s_c[i] + t + t;
+                    a_c[i] += a_step[i];
+                    s_c[i] += s_step[i];
+                }
+                *eval += prod;
+                e_c += e_step;
+            }
+        }
+        transcript.append_slice(b"round", &evals);
+        round_polys.push(evals);
+        let r: F = transcript.challenge(b"r");
+        challenges.push(r);
+        // Folding fixes the variable just bound to the challenge $r$
+        // in every table to optimize the work we do in the next round.
+        // For completeness and soundness we don't need to do it.
+        fold(&mut eq_t, r);
+        s.iter_mut().for_each(|t| fold(t, r));
+        if x_len > 1 {
+            x_len /= 2;
+        } else {
+            a.iter_mut().for_each(|t| fold(t, r));
+        }
+    }
+    SumcheckProverOutput {
+        proof: SumcheckProof { round_polys },
+        challenges,
+    }
+}
+
+/// Bind the low variable of an evaluation table to $r$, halving it.
+/// Takes the table as `table`, folded in place, and the challenge `r`.
+fn fold<F: PrimeField>(table: &mut Vec<F>, r: F) {
+    let half = table.len() / 2;
+    for y in 0..half {
+        // The line computes the value at $r$: start at the 0-value and move
+        // $r$ times the gap toward the 1-value. Rebuild on top of the existing
+        // table where previous values won't be needed in future computation.
+        table[y] = table[2 * y] + r * (table[2 * y + 1] - table[2 * y]);
+    }
+    table.truncate(half);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,6 +493,35 @@ mod tests {
         let mut p_t = Transcript::new(b"mulperm");
         let (out, v) = sumcheck1_prove(f, parts, &mut p_t);
         (g.evaluate(&alpha), out, v)
+    }
+
+    /// The final check $C_2 = \mathrm{eq}(\beta', \gamma) \prod_i
+    /// E(\tilde{\alpha}(\langle i \rangle, j^*), \tilde{\sigma}(\langle i
+    /// \rangle, j^*, x^*))$ at $\gamma = (x^*, j^*)$, with $\tilde{\sigma}$
+    /// evaluated directly in place of its $w$ openings.
+    fn c2(
+        sigma: &DenseMultilinearExtension<Fr>,
+        groups: Groups,
+        alpha: &[Fr],
+        beta_t: &[Fr],
+        // $\gamma$ is the random
+        // point Sumcheck 2 ends at
+        gamma: &[Fr],
+    ) -> Fr {
+        let log_w = groups.width.trailing_zeros() as usize;
+        let (x_star, j_star) = gamma.split_at(alpha.len());
+        let alpha_t = alpha_mle(alpha);
+        let prod: Fr = (0..groups.width)
+            .map(|i| {
+                let i_j: Vec<Fr> =
+                    bits(i, log_w).into_iter().chain(j_star.to_vec()).collect();
+                let i_j_x: Vec<Fr> =
+                    i_j.iter().chain(x_star).copied().collect();
+                // $E(a, s)$ is the one-variable eq mentioned
+                eq(&[alpha_t.evaluate(&i_j)], &[sigma.evaluate(&i_j_x)])
+            })
+            .product();
+        eq(beta_t, gamma) * prod
     }
 
     #[test]
@@ -568,5 +734,51 @@ mod tests {
             ),
             Err(SumcheckError::RoundCheckFailed { round: 0 })
         );
+    }
+
+    #[test]
+    fn sumcheck2_round_trip() {
+        let mut rng = test_rng();
+        for (perm, ells) in [
+            // Turning both into slices
+            // gives the same type `&[usize]`.
+            (sample_perm(), &[1, 2, 4][..]),
+            (shift_perm(), &[1, 2, 4, 8][..]),
+        ] {
+            let num_vars = perm.num_vars();
+            let sigma = sigma_mle::<Fr>(&perm);
+            let alpha: Vec<Fr> =
+                (0..num_vars).map(|_| Fr::rand(&mut rng)).collect();
+            for &ell in ells {
+                let groups = Groups::new(num_vars, ell).unwrap();
+                let total_vars = num_vars + ell.trailing_zeros() as usize;
+                let beta_t: Vec<Fr> =
+                    (0..total_vars).map(|_| Fr::rand(&mut rng)).collect();
+                // The claim $S_p = \tilde{p}(\beta')$ comes from Alg. 4's
+                // tables laid end to end, independent of $\tilde{\sigma}$.
+                let parts = partial_products(&perm, groups, &alpha).unwrap();
+                let p = DenseMultilinearExtension::from_evaluations_vec(
+                    total_vars,
+                    parts.iter().flat_map(|p| p.evaluations.clone()).collect(),
+                );
+                // $\mu + \log \ell$ entries
+                let claim = p.evaluate(&beta_t);
+                let mut p_t = Transcript::new(b"mulperm");
+                let out =
+                    sumcheck2_prove(&sigma, groups, &alpha, &beta_t, &mut p_t);
+                let mut v_t = Transcript::new(b"mulperm");
+                let res = sumcheck::verify(
+                    claim,
+                    total_vars,
+                    2 * groups.width + 1,
+                    &out.proof,
+                    &mut v_t,
+                )
+                .unwrap();
+                assert_eq!(res.challenges, out.challenges);
+                let want = c2(&sigma, groups, &alpha, &beta_t, &res.challenges);
+                assert_eq!(res.final_claim, want);
+            }
+        }
     }
 }

@@ -293,7 +293,7 @@ cargo fmt --check
     PCS trait, sumcheck, zerocheck, and product-check PIOPs
 - `biperm`: BiPerm implementation, library crate
 - `mulperm`: MulPerm implementation, library crate
-  - index, partial products, sumcheck 1 so far; power-of-two $\mu$ only
+  - index, partial products, both sumchecks so far; power-of-two $\mu$ only
 - `prodperm`: HyperPlonk-style grand-product, library crate
   - benchmarked against BiPerm, under Hyrax
 - `hyrax`: Hyrax PCS backend, library crate
@@ -343,7 +343,7 @@ cargo fmt --check
 linperm/
 ├── permcore/       # Shared building blocks
 ├── biperm/         # BiPerm prove/verify (indexed)
-├── mulperm/        # MulPerm index (in progress)
+├── mulperm/        # MulPerm (in progress)
 ├── prodperm/       # Grand-product prove/verify (indexed)
 ├── hyrax/          # Hyrax PCS backend (dense + sparse)
 └── scripts/        # Developer tooling
@@ -356,7 +356,7 @@ linperm/
   - [x] Index: $\tilde{\sigma}$ table, $\tilde{\alpha}$, groups
   - [x] Partial products: Algorithm 4 table lookups
   - [x] Sumcheck 1: $f \cdot \prod_j \tilde{p}$, send $v_j$
-  - [ ] Sumcheck 2: slow oracle, then direct prover
+  - [x] Sumcheck 2: Algorithm 7 direct prover, no bucketing
   - [ ] End to end: prove/verify, tamper tests
   - [ ] Padding: any $\mu$, not just powers of two
   - [ ] Benches: index/prove/verify phases, baseline note
